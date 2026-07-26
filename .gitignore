@@ -1,0 +1,33 @@
+# Secrets & local env
+.env
+backend/data/model.json
+backend/data/workspace.json
+
+# Runtime data (do not commit)
+backend/sessions/*
+!backend/sessions/.gitkeep
+backend/data/fs_undo/
+backend/memory/**
+!backend/memory/MEMORY.md
+backend/workspace/**
+!backend/workspace/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+*.log
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

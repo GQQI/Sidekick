@@ -1,0 +1,13 @@
+{
+  "provider": "deepseek",
+  "api_key": "",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-chat",
+  "subagent_model": "deepseek-chat",
+  "compress_model": "deepseek-chat",
+  "review_model": "deepseek-chat",
+  "reasoning_effort": "high",
+  "thinking_enabled": true,
+  "demo_mode": false,
+  "temperature": 0.2
+}
