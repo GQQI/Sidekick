@@ -78,7 +78,6 @@ python3 -m metateam serve
 Open **http://127.0.0.1:8787** → pick a workspace folder → Settings → Model → API key  
 (or copy `backend/data/model.json.example` → `model.json`).
 
-> Never commit real keys, `.env`, or chat history (see `.gitignore`).
 
 ### Frontend (optional)
 
