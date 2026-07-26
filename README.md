@@ -78,7 +78,6 @@ python3 -m metateam serve
 打开 **http://127.0.0.1:8787** → 选工作区文件夹 → 设置 → 模型 → API Key  
 （或复制 `backend/data/model.json.example` → `model.json`）
 
-> 切勿提交真实 Key、`.env` 或对话历史（见 `.gitignore`）。
 
 ### 前端（可选）
 
