@@ -469,9 +469,12 @@ class Agent:
             self._emit("parallel_batch", {"size": len(batch)})
             ordered: list[dict[str, Any] | None] = [None] * len(batch)
             with ThreadPoolExecutor(max_workers=min(8, len(batch))) as pool:
-                ctx = contextvars.copy_context()
+                # One Context per task — a shared Context cannot be entered by
+                # multiple worker threads at once (RuntimeError: already entered).
                 futs = {
-                    pool.submit(ctx.run, self._execute_one, tc): i
+                    pool.submit(
+                        contextvars.copy_context().run, self._execute_one, tc
+                    ): i
                     for i, tc in enumerate(batch)
                 }
                 for fut in as_completed(futs):

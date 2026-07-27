@@ -516,6 +516,53 @@ export function App() {
     commit(transcriptRef.current.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }
 
+  /** Keep the open tool detail panel in sync when status/callId advances. */
+  function syncToolPanel(tool: ToolCard, prevCallId?: string) {
+    setDetail((d) => {
+      if (d?.type !== "tool") return d;
+      const same =
+        d.tool.id === tool.id ||
+        d.tool.callId === tool.callId ||
+        (prevCallId != null &&
+          prevCallId !== "" &&
+          d.tool.callId === prevCallId) ||
+        (Boolean(d.tool.name) &&
+          d.tool.name === tool.name &&
+          (d.tool.status === "streaming" ||
+            d.tool.status === "running" ||
+            d.tool.status === "pending") &&
+          (tool.status === "running" ||
+            tool.status === "pending" ||
+            tool.status === "done" ||
+            tool.status === "error"));
+      return same ? { type: "tool", tool } : d;
+    });
+  }
+
+  function findToolMsg(opts: {
+    callId?: string;
+    name?: string;
+    statuses?: ToolCard["status"][];
+  }): ChatMsg | undefined {
+    const callId = opts.callId || "";
+    const name = opts.name || "";
+    const statuses = opts.statuses;
+    const list = transcriptRef.current;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      if (m.role !== "tool" || !m.tool) continue;
+      if (callId && m.tool.callId === callId) return m;
+      if (
+        name &&
+        m.tool.name === name &&
+        (!statuses || statuses.includes(m.tool.status))
+      ) {
+        return m;
+      }
+    }
+    return undefined;
+  }
+
   function setBusyState(v: boolean) {
     busyRef.current = v;
     setBusy(v);
@@ -1449,14 +1496,14 @@ export function App() {
     const callId = String(ev.data.call_id || uid());
     const name = String(ev.data.name || "tool");
     const pending = Boolean(ev.data.needs_approval);
-    const existing = transcriptRef.current.find(
-      (m) =>
-        m.role === "tool" &&
-        (m.tool?.callId === callId ||
-          (m.tool?.status === "streaming" &&
-            (m.tool.name === name || !m.tool.name))),
-    );
+    const existing =
+      findToolMsg({ callId }) ||
+      findToolMsg({
+        name,
+        statuses: ["streaming", "pending"],
+      });
     if (existing?.tool) {
+      const prevCallId = existing.tool.callId;
       const tool: ToolCard = {
         ...existing.tool,
         callId,
@@ -1468,6 +1515,7 @@ export function App() {
           formatToolSummary(name, ev.data.args ?? existing.tool.args),
       };
       updateMsg(existing.id, { tool });
+      syncToolPanel(tool, prevCallId);
       if (name === "write_file") {
         const preview = writeFilePreview(tool.args);
         if (preview) setDetail({ type: "tool", tool });
@@ -1482,7 +1530,9 @@ export function App() {
       status: pending ? "pending" : "running",
       summary:
         String(ev.data.summary || "") || formatToolSummary(name, ev.data.args),
-    };    appendMsg({ id: tool.id, role: "tool", content: "", tool });
+    };
+    appendMsg({ id: tool.id, role: "tool", content: "", tool });
+    syncToolPanel(tool);
     if (name === "write_file") setDetail({ type: "tool", tool });
     return tool;
   }
@@ -1497,29 +1547,33 @@ export function App() {
     const args = softParseToolArgs(argsRaw);
     const callId = realId || streamKey;
 
-    const existing = transcriptRef.current.find(
-      (m) =>
-        m.role === "tool" &&
-        (m.tool?.callId === callId ||
-          m.tool?.callId === streamKey ||
-          (realId && m.tool?.callId === realId) ||
-          (m.tool?.status === "streaming" &&
-            Number((m.tool.args as { _streamIndex?: number } | undefined)?._streamIndex) ===
-              index)),
-    );
+    const existing =
+      findToolMsg({ callId }) ||
+      findToolMsg({ callId: streamKey }) ||
+      (realId ? findToolMsg({ callId: realId }) : undefined) ||
+      transcriptRef.current.find(
+        (m) =>
+          m.role === "tool" &&
+          m.tool?.status === "streaming" &&
+          Number(
+            (m.tool.args as { _streamIndex?: number } | undefined)?._streamIndex,
+          ) === index,
+      );
 
     const summary = formatToolSummary(name || existing?.tool?.name || "", args);
     if (existing?.tool) {
+      const prevCallId = existing.tool.callId;
       const tool: ToolCard = {
         ...existing.tool,
         callId,
         name: name || existing.tool.name,
-        args,
+        args: { ...args, _streamIndex: index },
         argsRaw,
         status: "streaming",
         summary,
       };
       updateMsg(existing.id, { tool });
+      syncToolPanel(tool, prevCallId);
       if ((name || existing.tool.name) === "write_file") {
         setDetail({ type: "tool", tool });
       }
@@ -1546,23 +1600,24 @@ export function App() {
     const name = String(ev.data.name || "tool");
     const result = String(ev.data.result ?? ev.data.preview ?? "");
     const ok = ev.data.ok !== false && !result.startsWith("ERROR");
-    const hit = transcriptRef.current.find(
-      (m) =>
-        m.role === "tool" &&
-        (m.tool?.callId === callId || (!callId && m.tool?.name === name && m.tool.status === "running")),
-    );
+    const hit =
+      findToolMsg({ callId }) ||
+      findToolMsg({
+        name,
+        statuses: ["running", "streaming", "pending"],
+      });
     if (hit?.tool) {
+      const prevCallId = hit.tool.callId;
       const tool: ToolCard = {
         ...hit.tool,
+        callId: callId || hit.tool.callId,
         name,
         args: ev.data.args ?? hit.tool.args,
         result,
         status: ok ? "done" : "error",
       };
       updateMsg(hit.id, { tool });
-      if (detail?.type === "tool" && detail.tool.callId === tool.callId) {
-        setDetail({ type: "tool", tool });
-      }
+      syncToolPanel(tool, prevCallId);
       return;
     }
     const tool: ToolCard = {
@@ -1574,6 +1629,7 @@ export function App() {
       status: ok ? "done" : "error",
     };
     appendMsg({ id: tool.id, role: "tool", content: "", tool });
+    syncToolPanel(tool);
   }
 
   async function addAttachments(files: FileList | null) {
@@ -2008,17 +2064,23 @@ export function App() {
                 summary: String(ev.data.summary || ev.data.message || ""),
               });
               const callId = String(ev.data.call_id || "");
-              const hit = transcriptRef.current.find(
-                (m) => m.role === "tool" && m.tool?.callId === callId,
-              );
+              const hit =
+                findToolMsg({ callId }) ||
+                findToolMsg({
+                  name: String(ev.data.name || ""),
+                  statuses: ["streaming", "running", "pending"],
+                });
               if (hit?.tool) {
-                const tool = {
+                const prevCallId = hit.tool.callId;
+                const tool: ToolCard = {
                   ...hit.tool,
-                  status: "pending" as const,
+                  callId: callId || hit.tool.callId,
+                  status: "pending",
                   args: ev.data.args ?? hit.tool.args,
                   summary: String(ev.data.summary || ""),
                 };
                 updateMsg(hit.id, { tool });
+                syncToolPanel(tool, prevCallId);
                 if (tool.name === "write_file") setDetail({ type: "tool", tool });
               }
             }
