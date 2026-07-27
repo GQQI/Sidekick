@@ -215,6 +215,7 @@ def list_entries(rel: str = ".") -> dict[str, Any]:
     if base.is_file():
         return {
             "path": rel_to_workspace(base),
+            "abs_path": str(base),
             "name": base.name,
             "type": "file",
             "entries": [],
@@ -226,6 +227,7 @@ def list_entries(rel: str = ".") -> dict[str, Any]:
         item: dict[str, Any] = {
             "name": child.name,
             "path": rel_to_workspace(child),
+            "abs_path": str(child.resolve()),
             "type": "dir" if child.is_dir() else "file",
             "size": child.stat().st_size if child.is_file() else None,
         }
@@ -234,6 +236,7 @@ def list_entries(rel: str = ".") -> dict[str, Any]:
         entries.append(item)
     return {
         "path": rel_to_workspace(base) if base != workspace_root() else ".",
+        "abs_path": str(base.resolve()),
         "name": base.name,
         "type": "dir",
         "entries": entries,
@@ -816,4 +819,39 @@ def move_entry(rel: str, dest_dir: str) -> dict[str, Any]:
         "from": from_rel,
         "to_dir": rel_to_workspace(dest_parent),
         "type": "dir" if dest.is_dir() else "file",
+    }
+
+
+def reveal_in_os(rel: str) -> dict[str, Any]:
+    """Open the OS file manager at this workspace path (select file when possible)."""
+    import platform
+    import subprocess
+
+    fp = safe_resolve(rel)
+    if not fp.exists():
+        raise FileNotFoundError(str(fp))
+    abs_path = str(fp.resolve())
+    system = platform.system()
+
+    if system == "Windows":
+        # explorer /select, needs a single argument with no space after the comma
+        if fp.is_dir():
+            subprocess.Popen(["explorer", abs_path], shell=False)  # noqa: S603
+        else:
+            subprocess.Popen(["explorer", f"/select,{abs_path}"], shell=False)  # noqa: S603
+    elif system == "Darwin":
+        if fp.is_dir():
+            subprocess.Popen(["open", abs_path], shell=False)  # noqa: S603
+        else:
+            subprocess.Popen(["open", "-R", abs_path], shell=False)  # noqa: S603
+    else:
+        # Linux: open the containing folder (or the folder itself)
+        target = abs_path if fp.is_dir() else str(fp.parent)
+        subprocess.Popen(["xdg-open", target], shell=False)  # noqa: S603
+
+    return {
+        "status": "ok",
+        "path": rel_to_workspace(fp),
+        "abs_path": abs_path,
+        "type": "dir" if fp.is_dir() else "file",
     }

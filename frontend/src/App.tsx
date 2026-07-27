@@ -3,6 +3,8 @@ import {
   browseWorkspace,
   createSession,
   decideApproval,
+  answerAsk,
+  confirmPlan,
   deleteSession,
   fetchHealth,
   fetchMemory,
@@ -60,6 +62,10 @@ import { loadActiveSessionId, saveActiveSessionId } from "./sessionPersist";
 import { MarkdownView } from "./components/MarkdownView";
 import { usePrefs } from "./prefs";
 import { SlashMenu } from "./components/SlashMenu";
+import { TaskPlanPanel, type ActivePlan, type PlanTask, type PlanTaskStatus } from "./components/TaskPlanPanel";
+import { PlanConfirmDialog } from "./components/PlanConfirmDialog";
+import { WelcomeGate } from "./components/WelcomeGate";
+import type { PlanConfirmState } from "./types/plan";
 import { ThinkingBlock } from "./components/ThinkingBlock";
 import {
   buildSlashMenuItems,
@@ -88,6 +94,21 @@ type ApprovalPrompt = {
   callId: string;
   name: string;
   args: unknown;
+  summary: string;
+};
+
+type AskOption = { key: string; label: string };
+
+const ASK_CUSTOM_KEY = "custom";
+
+type AskPrompt = {
+  askId: string;
+  callId: string;
+  sessionId: string;
+  question: string;
+  options: AskOption[];
+  allowCustom: boolean;
+  customLabel: string;
   summary: string;
 };
 
@@ -252,10 +273,10 @@ const PRESETS: Record<string, Partial<ModelConfig>> = {
     provider: "deepseek",
     base_url: "https://api.deepseek.com",
     model: "deepseek-v4-pro",
-    subagent_model: "deepseek-v4-pro",
-    compress_model: "deepseek-v4-pro",
-    review_model: "deepseek-v4-pro",
-    reasoning_effort: "high",
+    subagent_model: "deepseek-chat",
+    compress_model: "deepseek-chat",
+    review_model: "deepseek-chat",
+    reasoning_effort: "medium",
     thinking_enabled: true,
     demo_mode: false,
   },
@@ -474,6 +495,14 @@ export function App() {
   const [fsRefresh, setFsRefresh] = useState(0);
   const [detail, setDetail] = useState<DetailView>(null);
   const [approval, setApproval] = useState<ApprovalPrompt | null>(null);
+  const [askPrompt, setAskPrompt] = useState<AskPrompt | null>(null);
+  const [askChoice, setAskChoice] = useState<string>("");
+  const [askOtherText, setAskOtherText] = useState("");
+  const [askSubmitting, setAskSubmitting] = useState(false);
+  const [chatMode, setChatMode] = useState<"plan" | "agent">("agent");
+  const [activePlan, setActivePlan] = useState<ActivePlan | null>(null);
+  const [planConfirm, setPlanConfirm] = useState<PlanConfirmState | null>(null);
+  const [planConfirmSubmitting, setPlanConfirmSubmitting] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const [queued, setQueued] = useState<QueuedMsg[]>([]);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
@@ -493,6 +522,9 @@ export function App() {
   const resizingDetailRef = useRef(false);
   const queuedRef = useRef<QueuedMsg[]>([]);
   const busyRef = useRef(false);
+  const sessionIdRef = useRef<string | null>(null);
+  const askPendingRef = useRef(false);
+  const planPendingRef = useRef(false);
 
   const transcriptRef = useRef<ChatMsg[]>([]);
   const streamIdRef = useRef<string | null>(null);
@@ -642,6 +674,41 @@ export function App() {
     return tr;
   }
 
+  function looksLikeOptionList(text: string): boolean {
+    const lines = text
+      .split("\n")
+      .filter((line) => /^\s*(\d+|[A-Za-z])[\.\)、:：]\s*.+/.test(line));
+    return lines.length >= 2;
+  }
+
+  function discardStreamBubble() {
+    const id = streamIdRef.current;
+    if (id) {
+      commit(transcriptRef.current.filter((m) => m.id !== id));
+    }
+    streamIdRef.current = null;
+    streamTextRef.current = "";
+    streamReasoningRef.current = "";
+    nativeReasoningRef.current = false;
+    thinkSplitRef.current.reset();
+  }
+
+  function stripDuplicateAskBubble(question: string) {
+    discardStreamBubble();
+    const q = question.trim();
+    for (let i = transcriptRef.current.length - 1; i >= 0; i--) {
+      const m = transcriptRef.current[i];
+      if (m.role !== "assistant") continue;
+      const text = (m.content || "").trim();
+      if (!text) break;
+      const sameQuestion = Boolean(q && text.includes(q.slice(0, Math.min(48, q.length))));
+      if (looksLikeOptionList(text) || sameQuestion) {
+        commit(transcriptRef.current.filter((x) => x.id !== m.id));
+      }
+      break;
+    }
+  }
+
   function sealStreamBubble() {
     const id = streamIdRef.current;
     if (!id) return;
@@ -700,8 +767,12 @@ export function App() {
     });
   }
 
-  function appendStreamChunk(chunk: string, reset = false) {
-    ensureStreamBubble(reset);
+  function appendStreamChunk(chunk: string, reset = false, discard = false) {
+    if (reset) {
+      if (discard) discardStreamBubble();
+      else sealStreamBubble();
+    }
+    ensureStreamBubble(false);
     if (!chunk) return;
     // Peel <think>…</think> out of content (models that embed thinking in content).
     // Skip tagged pieces once native reasoning_content has started this turn.
@@ -810,10 +881,31 @@ export function App() {
     setActiveWs(w.active?.path ? w.active : null);
   }
 
+  function syncContextFromSession(detail: { tokens?: number; limit?: number }) {
+    const tokens = Number(detail.tokens ?? 0);
+    const limit = Number(detail.limit ?? 0);
+    setCtx((c) => ({
+      tokens: Number.isFinite(tokens) && tokens >= 0 ? tokens : 0,
+      limit: Number.isFinite(limit) && limit > 0 ? limit : c.limit,
+    }));
+  }
+
+  function resetContextUsage() {
+    setCtx((c) => ({ ...c, tokens: 0 }));
+  }
+
   function applySessionDetail(detail: SessionDetail) {
     setSessionId(detail.id);
+    syncContextFromSession(detail);
     const mapped: ChatMsg[] = detail.messages
       .filter((m) => m.role === "user" || m.role === "assistant")
+      .filter((m) => {
+        const c = (m.content || "").trim();
+        // Hide legacy plan-step prompts that were wrongly stored as user turns
+        if (m.role === "user" && /^\[Plan step\s/i.test(c)) return false;
+        if (m.role === "user" && c.startsWith("[sidekick:")) return false;
+        return true;
+      })
       .map((m) => {
         if (m.role === "user") {
           const parsed = parseUserAttachments(m.content);
@@ -872,6 +964,7 @@ export function App() {
     const s = await createSession();
     setSessionId(s.id);
     commit([]);
+    resetContextUsage();
   }
 
   async function boot() {
@@ -900,6 +993,10 @@ export function App() {
   useEffect(() => {
     if (sessionId) saveActiveSessionId(sessionId, activeWs?.path || null);
   }, [sessionId, activeWs?.path]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 768px)");
@@ -964,7 +1061,7 @@ export function App() {
           target.isContentEditable);
 
       if (e.key === "Escape") {
-        if (approval) return;
+        if (approval || askPrompt || planConfirm) return;
         if (settingsOpen) {
           setSettingsOpen(false);
           return;
@@ -1012,7 +1109,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [approval, settingsOpen, sidePanel, explorerCollapsed, detail, input, sessionsPage]);
+  }, [approval, askPrompt, settingsOpen, sidePanel, explorerCollapsed, detail, input, sessionsPage]);
 
   useEffect(() => {
     if (!toast) return;
@@ -1294,6 +1391,7 @@ export function App() {
     setLive([]);
     setSubs([]);
     setDetail(null);
+    resetContextUsage();
     setToast(t("chatStarted"));
 
     if (wasBusy) {
@@ -1451,6 +1549,9 @@ export function App() {
     setSubs([]);
     setLive([]);
     setApproval(null);
+    setAskPrompt(null);
+    setAskChoice("");
+    setAskOtherText("");
     if (sessionId) {
       try {
         const res = await truncateSession(sessionId, keepUserTurns, {
@@ -1477,11 +1578,19 @@ export function App() {
 
   async function stopChat() {
     const pending = approval;
+    const pendingAsk = askPrompt;
+    const pendingPlan = planConfirm;
     // Clear UI immediately so the panel cannot stick
     setApproval(null);
+    setAskPrompt(null);
+    askPendingRef.current = false;
+    setAskChoice("");
+    setAskOtherText("");
+    setPlanConfirm(null);
+    planPendingRef.current = false;
 
     if (!busyRef.current && !abortRef.current) {
-      // Chat already idle: only dismiss a leftover approval if any
+      // Chat already idle: only dismiss leftover prompts
       if (pending && sessionId) {
         try {
           await decideApproval(sessionId, pending.approvalId, false, false);
@@ -1489,6 +1598,29 @@ export function App() {
           /* ignore */
         }
         setToast("已取消待确认操作");
+      }
+      if (pendingAsk && (sessionIdRef.current || sessionId)) {
+        try {
+          await answerAsk(
+            sessionIdRef.current || sessionId!,
+            pendingAsk.askId,
+            ASK_CUSTOM_KEY,
+            "",
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+      if (pendingPlan && (sessionIdRef.current || sessionId || pendingPlan.sessionId)) {
+        try {
+          await confirmPlan(
+            pendingPlan.sessionId || sessionIdRef.current || sessionId!,
+            pendingPlan.planId,
+            false,
+          );
+        } catch {
+          /* ignore */
+        }
       }
       return;
     }
@@ -1808,6 +1940,7 @@ export function App() {
       showUser?: boolean;
       userDisplay?: string;
       attachments?: MsgAttachment[];
+      mode?: "plan" | "agent";
     },
   ) {
     if (!msg || busyRef.current) return;
@@ -1825,6 +1958,7 @@ export function App() {
     setLive([]);
     setSubs([]);
     setCompressState(null);
+    setActivePlan(null);
     streamIdRef.current = null;
     streamTextRef.current = "";
     streamReasoningRef.current = "";
@@ -1844,6 +1978,8 @@ export function App() {
     const ac = new AbortController();
     abortRef.current = ac;
 
+    const runMode = opts?.mode ?? chatMode;
+
     try {
       const sid = await streamChat(
         msg,
@@ -1851,6 +1987,141 @@ export function App() {
         {
           onEvent: (ev: RuntimeEvent) => {
             const type = ev.type;
+
+            const parsePlanTasks = (raw: unknown): PlanTask[] => {
+              if (!Array.isArray(raw)) return [];
+              const out: PlanTask[] = [];
+              raw.forEach((item, i) => {
+                const o = item as Record<string, unknown>;
+                const title = String(o.title || "").trim();
+                if (!title) return;
+                out.push({
+                  id: String(o.id || `task_${i}`),
+                  title,
+                  detail: String(o.detail || "").trim() || undefined,
+                  status: String(o.status || "pending") as PlanTaskStatus,
+                });
+              });
+              return out;
+            };
+
+            if (type === "plan_created") {
+              const tasks = parsePlanTasks(ev.data.tasks);
+              const summary = String(ev.data.summary || "");
+              const planId = String(ev.data.plan_id || "");
+              const awaiting =
+                Boolean(ev.data.awaiting_confirm) || ev.data.mode === "plan";
+              if (awaiting) {
+                // Plan mode: only the confirm dialog — never the preview card
+                const planSid = String(
+                  ev.data.session_id || sessionIdRef.current || sessionId || "",
+                );
+                planPendingRef.current = true;
+                setPlanConfirm({
+                  planId,
+                  sessionId: planSid,
+                  summary,
+                  tasks,
+                });
+                setActivePlan(null);
+              } else {
+                // Merge with existing progress so a late plan_created does not
+                // wipe statuses already applied by plan_step.
+                setActivePlan((prev) => {
+                  const byId = new Map((prev?.tasks || []).map((t) => [t.id, t.status]));
+                  return {
+                    planId,
+                    summary,
+                    mode: "agent",
+                    awaitingConfirm: false,
+                    tasks: tasks.map((t, i) => ({
+                      ...t,
+                      status:
+                        byId.get(t.id) ||
+                        prev?.tasks[i]?.status ||
+                        t.status ||
+                        "pending",
+                    })),
+                  };
+                });
+              }
+            }
+            if (type === "plan_confirm_request") {
+              const tasks = parsePlanTasks(ev.data.tasks);
+              const summary = String(ev.data.summary || "");
+              const planId = String(ev.data.plan_id || "");
+              const planSid = String(
+                ev.data.session_id || sessionIdRef.current || sessionId || "",
+              );
+              planPendingRef.current = true;
+              setPlanConfirm({
+                planId,
+                sessionId: planSid,
+                summary,
+                tasks,
+              });
+              setActivePlan(null);
+            }
+            if (type === "plan_confirm_resolved") {
+              planPendingRef.current = false;
+              setPlanConfirm((cur) =>
+                cur && cur.planId === String(ev.data.plan_id || "") ? null : cur,
+              );
+              if (!ev.data.approved) {
+                setActivePlan(null);
+              }
+            }
+            if (type === "plan_step") {
+              const taskId = String(ev.data.task_id || "");
+              const status = String(ev.data.status || "running") as PlanTaskStatus;
+              const index = Number(ev.data.index);
+              const title = String(ev.data.title || "");
+              setPlanConfirm(null);
+              setActivePlan((prev) => {
+                if (!prev) {
+                  return {
+                    planId: String(ev.data.plan_id || ""),
+                    summary: title || t("taskPlanTitle"),
+                    mode: "agent",
+                    awaitingConfirm: false,
+                    tasks: [
+                      {
+                        id: taskId || `task_${index || 0}`,
+                        title: title || `步骤 ${(index || 0) + 1}`,
+                        status,
+                      },
+                    ],
+                  };
+                }
+                const tasks = prev.tasks.map((t, i) => {
+                  const hit =
+                    (taskId && t.id === taskId) ||
+                    (Number.isFinite(index) && i === index);
+                  if (!hit) return t;
+                  return { ...t, status, title: title || t.title };
+                });
+                // When a later step starts running, mark earlier unfinished steps done
+                if (status === "running" && Number.isFinite(index) && index > 0) {
+                  for (let i = 0; i < index; i++) {
+                    if (tasks[i]?.status === "pending" || tasks[i]?.status === "running") {
+                      tasks[i] = { ...tasks[i], status: "done" };
+                    }
+                  }
+                }
+                return {
+                  ...prev,
+                  mode: "agent",
+                  awaitingConfirm: false,
+                  tasks,
+                };
+              });
+            }
+            if (type === "plan_done") {
+              planPendingRef.current = false;
+              setPlanConfirm(null);
+              // Hide the plan card once the run finishes
+              setActivePlan(null);
+            }
 
             // Subagent events share the bus — accumulate into subagent transcript
             if (ev.parent_id) {
@@ -2010,7 +2281,11 @@ export function App() {
             }
 
             if (type === "session") {
-              setSessionId(String(ev.data.session_id || ""));
+              const sid = String(ev.data.session_id || "");
+              if (sid) {
+                sessionIdRef.current = sid;
+                setSessionId(sid);
+              }
             }
 
             if (type === "context_usage" || type === "llm_start") {
@@ -2059,8 +2334,9 @@ export function App() {
 
             if (type === "assistant_delta") {
               const reset = Boolean(ev.data.reset);
+              const discard = Boolean(ev.data.discard);
               const chunk = String(ev.data.chunk ?? ev.data.text ?? "");
-              appendStreamChunk(chunk, reset);
+              appendStreamChunk(chunk, reset, discard);
             }
 
             if (type === "assistant_reasoning_delta") {
@@ -2105,6 +2381,50 @@ export function App() {
               setApproval((cur) =>
                 cur && cur.approvalId === String(ev.data.approval_id || "") ? null : cur,
               );
+            }
+
+            if (type === "ask_request") {
+              const rawOpts = Array.isArray(ev.data.options) ? ev.data.options : [];
+              const options: AskOption[] = rawOpts
+                .map((o) => {
+                  if (!o || typeof o !== "object") return null;
+                  const rec = o as Record<string, unknown>;
+                  const key = String(rec.key || "").trim();
+                  const label = String(rec.label || "").trim();
+                  if (!key || !label) return null;
+                  return { key, label };
+                })
+                .filter((o): o is AskOption => Boolean(o));
+              const question = String(ev.data.question || "");
+              const allowCustom = ev.data.allow_custom !== false;
+              const customLabel = String(
+                ev.data.custom_label || (locale === "en" ? "Other (type your answer)" : "其他（请补充）"),
+              );
+              stripDuplicateAskBubble(question);
+              const askSid = String(
+                ev.data.session_id || sessionIdRef.current || sessionId || "",
+              );
+              askPendingRef.current = true;
+              setAskChoice("");
+              setAskOtherText("");
+              setAskPrompt({
+                askId: String(ev.data.ask_id || ""),
+                callId: String(ev.data.call_id || ""),
+                sessionId: askSid,
+                question,
+                options,
+                allowCustom,
+                customLabel,
+                summary: String(ev.data.summary || ev.data.message || ""),
+              });
+            }
+            if (type === "ask_resolved") {
+              askPendingRef.current = false;
+              setAskPrompt((cur) =>
+                cur && cur.askId === String(ev.data.ask_id || "") ? null : cur,
+              );
+              setAskChoice("");
+              setAskOtherText("");
             }
 
             if (type === "tool_start") {
@@ -2186,6 +2506,7 @@ export function App() {
           },
         },
         ac.signal,
+        runMode,
       );
       if (sid) setSessionId(sid);
     } catch (e) {
@@ -2201,6 +2522,14 @@ export function App() {
       stoppingRef.current = false;
       setBusyState(false);
       setApproval(null);
+      if (!askPendingRef.current) {
+        setAskPrompt(null);
+        setAskChoice("");
+        setAskOtherText("");
+      }
+      if (!planPendingRef.current) {
+        setPlanConfirm(null);
+      }
       void drainQueueSoon();
     }
   }
@@ -2273,6 +2602,82 @@ export function App() {
         return;
       }
       setToast(msg);
+    }
+  }
+
+  async function resolveAsk(choice: string, otherText = "") {
+    const prompt = askPrompt;
+    const sid = prompt?.sessionId || sessionIdRef.current || sessionId;
+    if (!prompt || !sid || askSubmitting) {
+      if (prompt && !sid) setToast("会话未就绪，请稍后重试");
+      return;
+    }
+    const id = prompt.askId;
+    if (!id) {
+      setToast("询问已失效，请重新发送消息");
+      return;
+    }
+    const opt = prompt.options.find((o) => o.key === choice);
+    const label = opt?.label || "";
+    const text = choice === ASK_CUSTOM_KEY ? otherText.trim() : "";
+    setAskSubmitting(true);
+    setAskPrompt(null);
+    setAskChoice("");
+    setAskOtherText("");
+    try {
+      await answerAsk(sid, id, choice, text, label);
+      setToast(t("askAnswered"));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setToast(msg);
+      askPendingRef.current = true;
+      setAskPrompt(prompt);
+      if (choice === ASK_CUSTOM_KEY) setAskOtherText(otherText);
+      setAskChoice(choice);
+    } finally {
+      setAskSubmitting(false);
+    }
+  }
+
+  async function resolvePlanConfirm(approved: boolean) {
+    const prompt = planConfirm;
+    const sid = prompt?.sessionId || sessionIdRef.current || sessionId;
+    if (!prompt || !sid || planConfirmSubmitting) {
+      if (prompt && !sid) setToast("会话未就绪，请稍后重试");
+      return;
+    }
+    if (!prompt.planId) {
+      setToast("方案已失效，请重新发送消息");
+      return;
+    }
+    setPlanConfirmSubmitting(true);
+    setPlanConfirm(null);
+    // Seed the progress panel BEFORE awaiting the API — otherwise late SSE
+    // plan_step events can arrive during the request and then get wiped by a
+    // post-await setActivePlan({…pending}).
+    if (approved) {
+      setActivePlan({
+        planId: prompt.planId,
+        summary: prompt.summary,
+        mode: "agent",
+        awaitingConfirm: false,
+        tasks: prompt.tasks.map((t) => ({ ...t, status: "pending" as const })),
+      });
+    } else {
+      planPendingRef.current = false;
+      setActivePlan(null);
+    }
+    try {
+      await confirmPlan(sid, prompt.planId, approved);
+      setToast(approved ? t("planApproved") : t("planCancelled"));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setToast(msg);
+      planPendingRef.current = true;
+      setPlanConfirm(prompt);
+      if (!approved) setActivePlan(null);
+    } finally {
+      setPlanConfirmSubmitting(false);
     }
   }
 
@@ -2373,39 +2778,17 @@ export function App() {
             <div className="boot-spinner" />
           </section>
         ) : needsWorkspace ? (
-          <section className="welcome-gate" aria-label={t("welcomeTitle")}>
-            <div className="welcome-card">
-              <h1>{t("welcomeTitle")}</h1>
-              <p>{t("welcomeHint")}</p>
-              <button
-                type="button"
-                className="primary welcome-open"
-                disabled={wsBusy}
-                onClick={() => void browseAndSetWorkspace()}
-              >
-                {wsBusy ? t("browsing") : t("openFolder")}
-              </button>
-              {workspaces.length > 0 && (
-                <div className="welcome-recent">
-                  <h2>{t("recentFolders")}</h2>
-                  <ul className="welcome-list">
-                    {workspaces.map((w) => (
-                      <li key={w.path}>
-                        <button
-                          type="button"
-                          disabled={wsBusy}
-                          onClick={() => void switchWorkspace(w.path)}
-                        >
-                          <strong>{w.name}</strong>
-                          <span>{w.path}</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          </section>
+          <WelcomeGate
+            title={t("welcomeTitle")}
+            hint={t("welcomeHint")}
+            openLabel={t("openFolder")}
+            browsingLabel={t("browsing")}
+            recentLabel={t("recentFolders")}
+            busy={wsBusy}
+            workspaces={workspaces}
+            onBrowse={() => void browseAndSetWorkspace()}
+            onSelect={(path) => void switchWorkspace(path)}
+          />
         ) : (
           <>
         <nav className="activity-rail" aria-label="Sidekick">
@@ -2505,6 +2888,7 @@ export function App() {
             ) : (
               <FileExplorer
                 rootName={activeWs?.name || "workspace"}
+                workspaceAbsPath={activeWs?.path || null}
                 collapsed={false}
                 width={explorerWidth}
                 onToggle={() => setExplorerCollapsed(true)}
@@ -2891,6 +3275,37 @@ export function App() {
               </ul>
             </div>
           )}
+          {activePlan &&
+            activePlan.mode === "agent" &&
+            !planConfirm &&
+            activePlan.tasks.some(
+              (t) => t.status === "pending" || t.status === "running",
+            ) && (
+            <TaskPlanPanel
+              plan={activePlan}
+              titleLabel={t("taskPlanTitle")}
+              subtitle={t(
+                "taskPlanProgress",
+                String(activePlan.tasks.filter((x) => x.status === "done").length),
+                String(activePlan.tasks.length),
+              )}
+              collapseLabel={t("planCollapse")}
+              expandLabel={t("planExpand")}
+            />
+          )}
+          {planConfirm && (
+            <PlanConfirmDialog
+              summary={planConfirm.summary}
+              tasks={planConfirm.tasks}
+              titleLabel={t("planConfirmNeeded")}
+              dialogLabel={t("planDialog")}
+              approveLabel={t("planApprove")}
+              rejectLabel={t("planReject")}
+              submitting={planConfirmSubmitting}
+              onApprove={() => void resolvePlanConfirm(true)}
+              onReject={() => void resolvePlanConfirm(false)}
+            />
+          )}
           {approval && (
             <div className="inline-approval" role="dialog" aria-label={t("approvalDialog")}>
               <div className="inline-approval-top">
@@ -2946,6 +3361,58 @@ export function App() {
                   {t("approvalAllowClass")}
                 </button>
               </div>
+            </div>
+          )}
+          {askPrompt && (
+            <div className="inline-ask" role="dialog" aria-label={t("askDialog")}>
+              <div className="inline-ask-top">
+                <div className="inline-ask-title">{t("askNeeded")}</div>
+                <p className="inline-ask-question">{askPrompt.question}</p>
+              </div>
+              <div className="inline-ask-options">
+                {askPrompt.options.map((o) => (
+                  <button
+                    key={o.key}
+                    type="button"
+                    className={`ask-option${askChoice === o.key ? " active" : ""}`}
+                    onClick={() => {
+                      setAskChoice(o.key);
+                      void resolveAsk(o.key);
+                    }}
+                    disabled={askSubmitting}
+                  >
+                    <span className="ask-key">{o.key}</span>
+                    <span className="ask-label">{o.label}</span>
+                  </button>
+                ))}
+              </div>
+              {askPrompt.allowCustom && (
+              <div className="inline-ask-other">
+                <div className="inline-ask-other-label">{askPrompt.customLabel}</div>
+                <div className="inline-ask-other-form">
+                  <textarea
+                    className="inline-ask-textarea"
+                    rows={3}
+                    placeholder={t("askOtherPlaceholder")}
+                    value={askOtherText}
+                    onChange={(e) => {
+                      setAskChoice(ASK_CUSTOM_KEY);
+                      setAskOtherText(e.target.value);
+                    }}
+                    onFocus={() => setAskChoice(ASK_CUSTOM_KEY)}
+                    disabled={askSubmitting}
+                  />
+                  <button
+                    type="button"
+                    className="approval-btn allow"
+                    disabled={askSubmitting}
+                    onClick={() => void resolveAsk(ASK_CUSTOM_KEY, askOtherText)}
+                  >
+                    {t("askSubmit")}
+                  </button>
+                </div>
+              </div>
+              )}
             </div>
           )}
           <form
@@ -3034,6 +3501,26 @@ export function App() {
               />
               <div className="composer-toolbar">
                 <div className="composer-tools">
+                  <div className="mode-toggle" role="group" aria-label="chat mode">
+                    <button
+                      type="button"
+                      className={`mode-btn${chatMode === "plan" ? " active" : ""}`}
+                      title={t("modePlanHint")}
+                      disabled={busy}
+                      onClick={() => setChatMode("plan")}
+                    >
+                      {t("modePlan")}
+                    </button>
+                    <button
+                      type="button"
+                      className={`mode-btn${chatMode === "agent" ? " active" : ""}`}
+                      title={t("modeAgentHint")}
+                      disabled={busy}
+                      onClick={() => setChatMode("agent")}
+                    >
+                      {t("modeAgent")}
+                    </button>
+                  </div>
                   <button
                     type="button"
                     className="composer-tool"

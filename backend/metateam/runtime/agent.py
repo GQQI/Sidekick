@@ -11,11 +11,25 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .approval import ApprovalGate, summarize_tool_call, tool_needs_approval
+from .ask import (
+    AskGate,
+    MIN_ASK_OPTIONS,
+    build_ask_options,
+    normalize_option_labels,
+    try_parse_inline_ask,
+)
 from ..core.config import Settings, get_settings
-from .context import debug_dump_budget, ensure_fit, messages_tokens
+from .context import (
+    context_budget_tokens,
+    debug_dump_budget,
+    ensure_fit,
+    messages_tokens,
+    schemas_tokens,
+)
 from ..core.events import EventBus, emit, new_id
 from ..core.guardrails import Guardrails
 from .llm import LLM, parse_tool_args
+from .plan import PlanGate, format_plan_markdown, generate_plan, needs_plan
 from .prompts import build_system_prompt
 from .review import run_review
 from ..services.skills import Skill, load_skills
@@ -52,6 +66,8 @@ class Agent:
         messages: Optional[list[dict[str, Any]]] = None,
         turn_counter: int = 0,
         approval: Optional[ApprovalGate] = None,
+        ask: Optional[AskGate] = None,
+        plan_gate: Optional[PlanGate] = None,
     ):
         self.settings = settings or get_settings()
         self.is_subagent = is_subagent
@@ -68,6 +84,8 @@ class Agent:
         self.guard = Guardrails(same_call_fail_limit=self.settings.same_call_fail_limit)
         self._cancel = threading.Event()
         self.approval = approval or ApprovalGate()
+        self.ask = ask or AskGate()
+        self.plan_gate = plan_gate or PlanGate()
         self._children: list[Agent] = []
 
         self.skills: list[Skill] = load_skills(self.settings.skills_dir)
@@ -83,6 +101,7 @@ class Agent:
             skills=self.skills,
             allow_delegate=can_delegate,
             run_child=self._run_child if can_delegate else None,
+            ask_user_fn=self._ask_user,
         )
 
         if messages is not None:
@@ -114,8 +133,10 @@ class Agent:
                 child.request_cancel()
             except Exception:
                 pass
-        # Unblock any waiting approvals as rejected
+        # Unblock any waiting approvals / asks / plan confirms as rejected
         self.approval.cancel_all()
+        self.ask.cancel_all()
+        self.plan_gate.cancel_all()
 
     def clear_cancel(self) -> None:
         self._cancel.clear()
@@ -123,22 +144,32 @@ class Agent:
     def cancelled(self) -> bool:
         return self._cancel.is_set()
 
+    def _is_internal_message(self, m: dict[str, Any]) -> bool:
+        if m.get("sidekick_internal") or m.get("internal"):
+            return True
+        meta = m.get("sidekick")
+        if isinstance(meta, dict) and meta.get("internal"):
+            return True
+        content = str(m.get("content") or "").lstrip()
+        return content.startswith("[Plan step ") or content.startswith("[sidekick:")
+
     def _last_user_index(self) -> int:
         for i in range(len(self.messages) - 1, -1, -1):
-            if self.messages[i].get("role") == "user":
+            m = self.messages[i]
+            if m.get("role") == "user" and not self._is_internal_message(m):
                 return i
         return -1
 
     def _seal_cancelled_turn(self, partial_text: str = "") -> str:
         """Drop unfinished tool chains after stop so the next turn won't resume them.
 
-        Keeps the last user message; replaces any trailing assistant/tool messages
-        with a single plain assistant note (optionally including streamed partial text).
+        Keeps the last real user message; replaces any trailing assistant/tool/plan-step
+        messages with a single plain assistant note (optionally including streamed partial text).
         """
         last_user = self._last_user_index()
         if last_user < 0:
             return partial_text
-        # Only rewrite the open turn (messages after the latest user)
+        # Only rewrite the open turn (messages after the latest real user)
         tail = self.messages[last_user + 1 :]
         if not tail and not (partial_text or "").strip():
             note = (
@@ -148,14 +179,15 @@ class Agent:
             self.messages.append({"role": "assistant", "content": note})
             return note
 
-        # Collect any plain assistant text already in the tail (ignore tool_calls msgs)
+        # Collect any plain assistant text already in the tail (ignore tool_calls msgs
+        # and plan-step internal prompts). Prefer the latest partial stream.
         kept_bits: list[str] = []
         if (partial_text or "").strip():
             kept_bits.append(partial_text.strip())
         for m in tail:
             if m.get("role") != "assistant":
                 continue
-            if m.get("tool_calls"):
+            if m.get("tool_calls") or self._is_internal_message(m):
                 continue
             text = str(m.get("content") or "").strip()
             if text and text not in kept_bits:
@@ -166,6 +198,10 @@ class Agent:
             "（用户已停止本轮生成。请等待下一条用户指令；"
             "不要继续或恢复刚才未完成的任务。）"
         )
+        # Keep the user-visible stop short — do not paste the whole tool dump again
+        # when we already streamed it; prefer a brief seal when body is huge.
+        if len(body) > 2500:
+            body = body[:2500].rstrip() + "…"
         content = f"{body}\n\n{note}" if body else note
         self.messages = self.messages[: last_user + 1]
         self.messages.append({"role": "assistant", "content": content})
@@ -256,6 +292,9 @@ class Agent:
             agent_id=child_id,
             bus=self.bus,
             on_event=self.on_event,
+            approval=self.approval,
+            ask=self.ask,
+            plan_gate=self.plan_gate,
         )
         self._children.append(child)
         if self.cancelled():
@@ -277,8 +316,81 @@ class Agent:
         )
         return result.text or "(empty summary)"
 
+    def _ask_user(
+        self,
+        *,
+        question: str,
+        options: list[str] | None = None,
+        allow_custom: bool = True,
+        custom_label: str = "其他（请补充）",
+        # Legacy flat args (older prompts / cached tool calls)
+        option_a: str = "",
+        option_b: str = "",
+        option_c: str = "",
+        option_d: str = "",
+    ) -> str:
+        q = (question or "").strip()
+        if not q:
+            return "ERROR: empty question"
+
+        labels = normalize_option_labels(options)
+        if len(labels) < MIN_ASK_OPTIONS:
+            legacy = [
+                str(option_a or "").strip(),
+                str(option_b or "").strip(),
+                str(option_c or "").strip(),
+            ]
+            labels = [x for x in legacy if x]
+            if str(option_d or "").strip():
+                labels.append(str(option_d).strip())
+
+        built = build_ask_options(labels)
+        if len(built) < MIN_ASK_OPTIONS:
+            return (
+                f"ERROR: ask_user needs at least {MIN_ASK_OPTIONS} options; "
+                f"got {len(built)}"
+            )
+
+        allow_other = bool(allow_custom)
+        other_label = str(custom_label or "其他（请补充）").strip() or "其他（请补充）"
+        ask_id = new_id("ask")
+        call_id = new_id("call")
+        self._emit("assistant_delta", {"chunk": "", "reset": True, "discard": True})
+        self._emit(
+            "ask_request",
+            {
+                "ask_id": ask_id,
+                "call_id": call_id,
+                "session_id": self.session_id or "",
+                "question": q,
+                "options": built,
+                "allow_custom": allow_other,
+                "custom_label": other_label,
+                "summary": f"询问用户: {q[:120]}",
+                "message": f"等待用户选择：{q[:80]}",
+            },
+        )
+        answer = self.ask.request(
+            ask_id,
+            q,
+            built,
+            allow_custom=allow_other,
+            custom_label=other_label,
+        )
+        self._emit(
+            "ask_resolved",
+            {
+                "ask_id": ask_id,
+                "call_id": call_id,
+                "answer": answer,
+                "message": "用户已回答" if not str(answer).startswith("ERROR:") else "询问已取消或超时",
+            },
+        )
+        return answer
+
     def _maybe_compress(self) -> None:
-        before = messages_tokens(self.messages)
+        schemas = self.registry.schemas()
+        before = context_budget_tokens(self.messages, schemas)
         limit = self.settings.context_limit
         self._emit(
             "context_usage",
@@ -286,6 +398,8 @@ class Agent:
                 "tokens": before,
                 "limit": limit,
                 "ratio": round(before / max(1, limit), 4),
+                "messages_tokens": messages_tokens(self.messages),
+                "schemas_tokens": schemas_tokens(schemas),
             },
         )
         trigger = int(limit * self.settings.compress_trigger_ratio)
@@ -314,16 +428,20 @@ class Agent:
                 },
             )
 
+        # Reserve room for tools[] so compressed messages still fit with schemas
+        msg_limit = max(4000, limit - schemas_tokens(schemas) - 256)
         self.messages, meta = ensure_fit(
             self.messages,
-            context_limit=limit,
+            context_limit=msg_limit,
             keep_recent_tokens=self.settings.keep_recent_tokens,
             trigger_ratio=self.settings.compress_trigger_ratio,
             max_attempts=self.settings.max_compress_attempts,
             llm=self.compress_llm,
             on_progress=_progress,
         )
-        after = messages_tokens(self.messages)
+        after = context_budget_tokens(self.messages, schemas)
+        if meta.get("compressed"):
+            self._last_compressed = True
         self._emit(
             "compress",
             {
@@ -341,6 +459,8 @@ class Agent:
                 "tokens": after,
                 "limit": limit,
                 "ratio": round(after / max(1, limit), 4),
+                "messages_tokens": messages_tokens(self.messages),
+                "schemas_tokens": schemas_tokens(schemas),
             },
         )
 
@@ -354,7 +474,8 @@ class Agent:
             (tool and getattr(tool, "requires_approval", False)) or tool_needs_approval(name)
         )
         summary = summarize_tool_call(name, args)
-        preapproved = bool(needs_ok and not self.is_subagent and self.approval.is_preapproved(name))
+        # Subagents share the parent's ApprovalGate — mutating tools still need confirm
+        preapproved = bool(needs_ok and self.approval.is_preapproved(name))
         self._emit(
             "tool_start",
             {
@@ -367,7 +488,7 @@ class Agent:
             },
         )
 
-        if needs_ok and not self.is_subagent:
+        if needs_ok:
             if preapproved:
                 self._emit(
                     "approval_auto",
@@ -482,7 +603,303 @@ class Agent:
             results.extend(r for r in ordered if r is not None)
         return results
 
-    def run(self, user_text: str, *, do_review: bool = True) -> AgentResult:
+    def _run_plan_only(self, user_text: str) -> tuple[str, int, bool, bool]:
+        """Generate a plan, wait for user confirm, then execute if approved."""
+        plan = generate_plan(self.compress_llm, user_text)
+        plan_id = str(plan["plan_id"])
+        tasks: list[dict[str, Any]] = list(plan.get("tasks") or [])
+        summary = str(plan.get("summary") or "执行计划")
+        self._emit(
+            "plan_created",
+            {
+                "plan_id": plan_id,
+                "session_id": self.session_id or "",
+                "summary": summary,
+                "tasks": tasks,
+                "mode": "plan",
+                "awaiting_confirm": True,
+            },
+        )
+        self._emit(
+            "plan_confirm_request",
+            {
+                "plan_id": plan_id,
+                "session_id": self.session_id or "",
+                "summary": summary,
+                "tasks": tasks,
+                "message": f"等待确认方案：{summary[:80]}",
+            },
+        )
+        approved = self.plan_gate.request(plan_id, summary=summary, tasks=tasks)
+        self._emit(
+            "plan_confirm_resolved",
+            {
+                "plan_id": plan_id,
+                "approved": approved,
+                "message": "方案已确认，开始执行" if approved else "方案已取消",
+            },
+        )
+        if not approved or self.cancelled():
+            md = format_plan_markdown(plan, awaiting_confirm=False)
+            self._emit("assistant_delta", {"chunk": "", "reset": True, "discard": True})
+            self._emit("assistant_delta", {"chunk": md})
+            self.messages.append({"role": "assistant", "content": md})
+            self._emit(
+                "plan_done",
+                {
+                    "plan_id": plan_id,
+                    "message": "方案未执行",
+                    "cancelled": True,
+                },
+            )
+            return md, 0, self.cancelled(), False
+
+        return self._execute_plan(plan, user_text)
+
+    def _run_planned_agent(self, user_text: str) -> tuple[str, int, bool, bool]:
+        plan = generate_plan(self.compress_llm, user_text)
+        return self._execute_plan(plan, user_text)
+
+    def _execute_plan(self, plan: dict[str, Any], user_text: str) -> tuple[str, int, bool, bool]:
+        plan_id = str(plan["plan_id"])
+        tasks: list[dict[str, Any]] = list(plan.get("tasks") or [])
+        self._emit(
+            "plan_created",
+            {
+                "plan_id": plan_id,
+                "summary": plan.get("summary") or "",
+                "tasks": tasks,
+                "mode": "agent",
+                "awaiting_confirm": False,
+            },
+        )
+        intro = f"## {plan.get('summary') or '执行计划'}\n\n将按任务列表逐步执行…\n"
+        self._emit("assistant_delta", {"chunk": "", "reset": True})
+        self._emit("assistant_delta", {"chunk": intro})
+
+        per_step = max(8, self.settings.max_iterations // 3)
+        turned = 0
+        was_cancelled = False
+        compressed = bool(getattr(self, "_last_compressed", False))
+        step_notes: list[str] = []
+
+        for i, task in enumerate(tasks):
+            if self.cancelled():
+                was_cancelled = True
+                break
+            tid = str(task.get("id") or new_id("task"))
+            title = str(task.get("title") or f"步骤 {i + 1}")
+            self._emit(
+                "plan_step",
+                {
+                    "plan_id": plan_id,
+                    "task_id": tid,
+                    "index": i,
+                    "status": "running",
+                    "title": title,
+                },
+            )
+            prior = "\n".join(f"- {s}" for s in step_notes) if step_notes else "(none)"
+            step_msg = (
+                f"[Plan step {i + 1}/{len(tasks)}] {title}\n"
+                f"{task.get('detail') or ''}\n\n"
+                f"Original goal: {user_text[:800]}\n"
+                f"Completed prior steps:\n{prior}\n\n"
+                "Complete ONLY this step using tools, then reply with a brief summary."
+            )
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": step_msg,
+                    "sidekick_internal": True,
+                    "sidekick": {"internal": True, "kind": "plan_step", "index": i},
+                }
+            )
+            step_final, step_iters, step_cancelled, step_compressed = self._run_agent_loop(
+                per_step
+            )
+            turned += step_iters
+            if step_compressed:
+                compressed = True
+            if step_cancelled:
+                was_cancelled = True
+            note = f"{title}: {(step_final or '').strip()[:400]}"
+            step_notes.append(note)
+            status = "done"
+            if step_cancelled:
+                status = "cancelled"
+            elif (step_final or "").startswith("ERROR"):
+                status = "error"
+            # Emit completion immediately so the UI can advance before the next step starts
+            self._emit(
+                "plan_step",
+                {
+                    "plan_id": plan_id,
+                    "task_id": tid,
+                    "index": i,
+                    "status": status,
+                    "title": title,
+                },
+            )
+            if was_cancelled:
+                break
+
+        self._emit("plan_done", {"plan_id": plan_id, "message": "计划执行完成"})
+        lines = [intro, "### 执行结果", ""]
+        for note in step_notes:
+            lines.append(f"- ✅ {note}")
+        final = "\n".join(lines)
+        self.messages.append({"role": "assistant", "content": final})
+        self._emit("assistant_delta", {"chunk": "", "reset": True})
+        self._emit("assistant_delta", {"chunk": final})
+        return final, turned, was_cancelled, compressed
+
+    def _run_agent_loop(self, max_iters: int) -> tuple[str, int, bool, bool]:
+        """Run tool-calling loop until the model stops with text or max iters."""
+        compressed = False
+        final = ""
+        turned = 0
+        was_cancelled = False
+
+        for i in range(1, max_iters + 1):
+            if self.cancelled():
+                was_cancelled = True
+                break
+            turned = i
+            self._maybe_compress()
+            if getattr(self, "_last_compressed", False):
+                compressed = True
+            schemas = self.registry.schemas()
+            self._emit(
+                "llm_start",
+                {
+                    "turn": i,
+                    "budget": json.loads(debug_dump_budget(self.messages)),
+                    "tokens": context_budget_tokens(self.messages, schemas),
+                    "messages_tokens": messages_tokens(self.messages),
+                    "schemas_tokens": schemas_tokens(schemas),
+                    "limit": self.settings.context_limit,
+                },
+            )
+            assistant: Optional[dict[str, Any]] = None
+            streamed_buf = ""
+            self._emit("assistant_delta", {"chunk": "", "reset": True})
+            try:
+                for kind, payload in self.llm.stream_chat(
+                    self.messages,
+                    tools=self.registry.schemas(),
+                    cancel_check=self.cancelled,
+                ):
+                    if self.cancelled():
+                        was_cancelled = True
+                        break
+                    if kind == "delta":
+                        streamed_buf += str(payload)
+                        self._emit("assistant_delta", {"chunk": str(payload)})
+                    elif kind == "reasoning_delta":
+                        self._emit(
+                            "assistant_reasoning_delta",
+                            {"chunk": str(payload)},
+                        )
+                    elif kind == "tool_delta" and isinstance(payload, dict):
+                        self._emit("tool_call_delta", payload)
+                    elif kind == "done":
+                        assistant = payload  # type: ignore[assignment]
+            except Exception:
+                if self.cancelled():
+                    was_cancelled = True
+                    if streamed_buf.strip() and not final:
+                        final = streamed_buf.strip()
+                        self.messages.append({"role": "assistant", "content": final})
+                    break
+                if self.cancelled():
+                    was_cancelled = True
+                    break
+                assistant = self.llm.chat(self.messages, tools=self.registry.schemas())
+                preamble_fb = (assistant.get("content") or "").strip()
+                if preamble_fb:
+                    self._stream_text_to_ui(preamble_fb)
+
+            if was_cancelled:
+                if not final:
+                    partial = ""
+                    if isinstance(assistant, dict):
+                        partial = str(assistant.get("content") or "").strip()
+                    if not partial:
+                        partial = streamed_buf.strip()
+                    if partial:
+                        final = partial
+                        self.messages.append({"role": "assistant", "content": final})
+                break
+            if assistant is None:
+                was_cancelled = True
+                if streamed_buf.strip() and not final:
+                    final = streamed_buf.strip()
+                    self.messages.append({"role": "assistant", "content": final})
+                break
+            self.messages.append(assistant)
+
+            tool_calls = assistant.get("tool_calls") or []
+            preamble = (assistant.get("content") or "").strip()
+
+            if not tool_calls:
+                parsed_ask = try_parse_inline_ask(preamble)
+                if parsed_ask:
+                    self.messages.pop()
+                    self._emit("assistant_delta", {"chunk": "", "reset": True, "discard": True})
+                    answer = self._ask_user(
+                        question=str(parsed_ask.get("question") or ""),
+                        options=list(parsed_ask.get("options") or []),
+                        allow_custom=bool(parsed_ask.get("allow_custom", True)),
+                    )
+                    self.messages.append({"role": "user", "content": answer})
+                    continue
+
+                final = preamble
+                if not final:
+                    reasoning = str(assistant.get("reasoning") or "").strip()
+                    if reasoning:
+                        final = (
+                            reasoning
+                            if len(reasoning) <= 3000
+                            else reasoning[:3000] + "…"
+                        )
+                    else:
+                        final = "（本轮已完成）"
+                    self.messages[-1]["content"] = final
+                    self._emit("assistant_delta", {"chunk": "", "reset": True})
+                    self._emit("assistant_delta", {"chunk": final})
+                break
+
+            names = [(tc.get("function") or {}).get("name", "?") for tc in tool_calls]
+            self._emit(
+                "assistant_status",
+                {"text": f"调用工具：{', '.join(names)}", "tools": names},
+            )
+            if self.cancelled():
+                was_cancelled = True
+                break
+            for tr in self._execute_tools(tool_calls):
+                if self.cancelled():
+                    was_cancelled = True
+                    break
+                self.messages.append(tr)
+            if was_cancelled:
+                break
+        else:
+            if not was_cancelled:
+                self._emit("max_iterations", {"n": max_iters})
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": "Iteration budget exhausted. Summarize status and stop.",
+                    }
+                )
+                final = self._stream_final_reply()
+
+        return final, turned, was_cancelled, compressed
+
+    def run(self, user_text: str, *, mode: str = "agent", do_review: bool = True) -> AgentResult:
         # Top-level turns reset cancel; subagents keep a cancel already set by parent.
         if not self.is_subagent:
             self.clear_cancel()
@@ -508,127 +925,20 @@ class Agent:
             else self.settings.max_iterations
         )
         compressed = False
+        self._last_compressed = False
         final = ""
         turned = 0
         was_cancelled = False
+        mode_n = (mode or "agent").strip().lower()
 
         try:
-            for i in range(1, max_iters + 1):
-                if self.cancelled():
-                    was_cancelled = True
-                    break
-                turned = i
-                self._maybe_compress()
-                self._emit(
-                    "llm_start",
-                    {
-                        "turn": i,
-                        "budget": json.loads(debug_dump_budget(self.messages)),
-                        "tokens": messages_tokens(self.messages),
-                        "limit": self.settings.context_limit,
-                    },
-                )
-                assistant: Optional[dict[str, Any]] = None
-                streamed_buf = ""
-                self._emit("assistant_delta", {"chunk": "", "reset": True})
-                try:
-                    for kind, payload in self.llm.stream_chat(
-                        self.messages,
-                        tools=self.registry.schemas(),
-                        cancel_check=self.cancelled,
-                    ):
-                        if self.cancelled():
-                            was_cancelled = True
-                            break
-                        if kind == "delta":
-                            streamed_buf += str(payload)
-                            self._emit("assistant_delta", {"chunk": str(payload)})
-                        elif kind == "reasoning_delta":
-                            self._emit(
-                                "assistant_reasoning_delta",
-                                {"chunk": str(payload)},
-                            )
-                        elif kind == "tool_delta" and isinstance(payload, dict):
-                            self._emit("tool_call_delta", payload)
-                        elif kind == "done":
-                            assistant = payload  # type: ignore[assignment]
-                except Exception:
-                    if self.cancelled():
-                        was_cancelled = True
-                        if streamed_buf.strip() and not final:
-                            final = streamed_buf.strip()
-                            self.messages.append({"role": "assistant", "content": final})
-                        break
-                    # Fallback to non-streaming if provider rejects stream+tools
-                    if self.cancelled():
-                        was_cancelled = True
-                        break
-                    assistant = self.llm.chat(self.messages, tools=self.registry.schemas())
-                    preamble_fb = (assistant.get("content") or "").strip()
-                    if preamble_fb:
-                        self._stream_text_to_ui(preamble_fb)
-
-                if was_cancelled:
-                    # Preserve whatever was already streamed instead of dropping it
-                    if not final:
-                        partial = ""
-                        if isinstance(assistant, dict):
-                            partial = str(assistant.get("content") or "").strip()
-                        if not partial:
-                            partial = streamed_buf.strip()
-                        if partial:
-                            final = partial
-                            self.messages.append({"role": "assistant", "content": final})
-                    break
-                if assistant is None:
-                    was_cancelled = True
-                    if streamed_buf.strip() and not final:
-                        final = streamed_buf.strip()
-                        self.messages.append({"role": "assistant", "content": final})
-                    break
-                self.messages.append(assistant)
-
-                tool_calls = assistant.get("tool_calls") or []
-                preamble = (assistant.get("content") or "").strip()
-
-                if not tool_calls:
-                    final = preamble
-                    if not final:
-                        # Empty content (common on reasoning models) — drop stub & stream
-                        self.messages.pop()
-                        final = self._stream_final_reply()
-                    break
-
-                names = [
-                    (tc.get("function") or {}).get("name", "?") for tc in tool_calls
-                ]
-                self._emit(
-                    "assistant_status",
-                    {
-                        "text": f"调用工具：{', '.join(names)}",
-                        "tools": names,
-                    },
-                )
-                if self.cancelled():
-                    was_cancelled = True
-                    break
-                for tr in self._execute_tools(tool_calls):
-                    if self.cancelled():
-                        was_cancelled = True
-                        break
-                    self.messages.append(tr)
-                if was_cancelled:
-                    break
+            if not self.is_subagent and mode_n == "plan":
+                final, turned, was_cancelled, compressed = self._run_plan_only(user_text)
+            elif not self.is_subagent and mode_n == "agent" and needs_plan(user_text):
+                # Complex goals: propose a plan and wait for confirm (same as Plan mode)
+                final, turned, was_cancelled, compressed = self._run_plan_only(user_text)
             else:
-                if not was_cancelled:
-                    self._emit("max_iterations", {"n": max_iters})
-                    self.messages.append(
-                        {
-                            "role": "user",
-                            "content": "Iteration budget exhausted. Summarize status and stop.",
-                        }
-                    )
-                    final = self._stream_final_reply()
+                final, turned, was_cancelled, compressed = self._run_agent_loop(max_iters)
 
             if was_cancelled:
                 self._emit("cancelled", {"message": "已停止生成"})
@@ -655,7 +965,7 @@ class Agent:
                 "turn_end",
                 {
                     "iterations": turned,
-                    "tokens": messages_tokens(self.messages),
+                    "tokens": context_budget_tokens(self.messages, self.registry.schemas()),
                     "message": "turn complete",
                     "cancelled": was_cancelled,
                 },
@@ -664,7 +974,7 @@ class Agent:
                 text=final,
                 messages=self.messages,
                 iterations=turned,
-                compressed=compressed,
+                compressed=compressed or bool(getattr(self, "_last_compressed", False)),
                 agent_id=self.agent_id,
                 review=review,
                 cancelled=was_cancelled,
@@ -679,12 +989,7 @@ class Agent:
         if not text:
             return
         self._emit("assistant_delta", {"chunk": "", "reset": True})
-        step = 24
-        for i in range(0, len(text), step):
-            if self.cancelled():
-                break
-            self._emit("assistant_delta", {"chunk": text[i : i + step]})
-            time.sleep(0.012)
+        self._emit("assistant_delta", {"chunk": text})
 
     def _stream_final_reply(self) -> str:
         """Stream a tool-less completion into the UI; return full text."""

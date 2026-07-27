@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from ..core.config import REPO_ROOT, get_settings
-from ..runtime.context import messages_tokens
+from ..runtime.context import context_budget_tokens, messages_tokens, schemas_tokens
 from ..core.events import Event
 from ..services.memory import read_memory, write_memory
 from ..services.model_config import load_model_config, update_model_config
@@ -47,6 +47,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     session_id: Optional[str] = None
+    mode: str = "agent"  # "plan" | "agent"
 
 
 class MemoryUpdate(BaseModel):
@@ -289,6 +290,23 @@ def api_files_move(body: FileMove) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
+class FileReveal(BaseModel):
+    path: str = "."
+
+
+@app.post("/api/files/reveal")
+def api_files_reveal(body: FileReveal) -> dict[str, Any]:
+    """Reveal a workspace path in the OS file manager."""
+    try:
+        return fs_api.reveal_in_os(body.path)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, f"reveal failed: {exc}") from exc
+
+
 @app.get("/api/files/undo")
 def api_files_undo_status() -> dict[str, Any]:
     from ..services import fs_undo
@@ -349,11 +367,16 @@ def get_session(session_id: str) -> dict[str, Any]:
     sess = STORE.get(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
+    schemas = sess.agent.registry.schemas()
+    budget = context_budget_tokens(sess.agent.messages, schemas)
     return {
         "id": sess.id,
         "title": sess.title,
         "messages": STORE.ui_messages(sess),
-        "tokens": messages_tokens(sess.agent.messages),
+        "tokens": budget,
+        "messages_tokens": messages_tokens(sess.agent.messages),
+        "schemas_tokens": schemas_tokens(schemas),
+        "limit": sess.agent.settings.context_limit,
         "tools": sess.agent.registry.names(),
         "demo": sess.agent.settings.demo_mode,
     }
@@ -438,6 +461,51 @@ def decide_approval(session_id: str, approval_id: str, body: ApprovalDecision) -
     }
 
 
+class AskAnswer(BaseModel):
+    choice: str = ""  # option key (1, 2, …) or "custom"
+    text: str = ""  # free-form when custom (or optional note)
+    option_label: str = ""
+
+
+@app.post("/api/sessions/{session_id}/asks/{ask_id}")
+def answer_ask(session_id: str, ask_id: str, body: AskAnswer) -> dict[str, Any]:
+    sess = STORE.get(session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    choice = (body.choice or "").strip()
+    if not choice and not (body.text or "").strip():
+        raise HTTPException(400, "choice or text required")
+    STORE.answer_ask(
+        session_id,
+        ask_id,
+        choice=choice or "custom",
+        text=body.text or "",
+        option_label=body.option_label or "",
+    )
+    return {
+        "status": "ok",
+        "ask_id": ask_id,
+        "choice": choice or "custom",
+    }
+
+
+class PlanConfirm(BaseModel):
+    approved: bool = True
+
+
+@app.post("/api/sessions/{session_id}/plans/{plan_id}")
+def confirm_plan(session_id: str, plan_id: str, body: PlanConfirm) -> dict[str, Any]:
+    sess = STORE.get(session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    STORE.decide_plan(session_id, plan_id, bool(body.approved))
+    return {
+        "status": "ok",
+        "plan_id": plan_id,
+        "approved": bool(body.approved),
+    }
+
+
 @app.post("/api/chat")
 async def chat_sse(req: ChatRequest) -> EventSourceResponse:
     sess = STORE.get(req.session_id) if req.session_id else None
@@ -469,7 +537,7 @@ async def chat_sse(req: ChatRequest) -> EventSourceResponse:
                 }
             )
             sess.updated_at = __import__("time").time()
-            result = sess.agent.run(req.message)
+            result = sess.agent.run(req.message, mode=req.mode or "agent")
             sess.updated_at = __import__("time").time()
             try:
                 STORE.persist(sess.id)

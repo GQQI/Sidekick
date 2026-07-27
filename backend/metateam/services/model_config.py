@@ -17,10 +17,11 @@ DEFAULTS = {
     "api_key": "",
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-v4-pro",
-    "subagent_model": "deepseek-v4-pro",
-    "compress_model": "deepseek-v4-pro",
-    "review_model": "deepseek-v4-pro",
-    "reasoning_effort": "high",
+    # Cheaper defaults for secondary roles — override in UI if needed
+    "subagent_model": "deepseek-chat",
+    "compress_model": "deepseek-chat",
+    "review_model": "deepseek-chat",
+    "reasoning_effort": "medium",
     "thinking_enabled": True,
     "demo_mode": False,
     "temperature": 0.2,
@@ -33,10 +34,10 @@ class ModelConfig:
     api_key: str = ""
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-v4-pro"
-    subagent_model: str = "deepseek-v4-pro"
-    compress_model: str = "deepseek-v4-pro"
-    review_model: str = "deepseek-v4-pro"
-    reasoning_effort: str = "high"
+    subagent_model: str = "deepseek-chat"
+    compress_model: str = "deepseek-chat"
+    review_model: str = "deepseek-chat"
+    reasoning_effort: str = "medium"
     thinking_enabled: bool = True
     demo_mode: bool = False
     temperature: float = 0.2

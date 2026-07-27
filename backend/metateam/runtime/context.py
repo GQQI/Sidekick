@@ -31,6 +31,26 @@ def messages_tokens(messages: list[dict[str, Any]]) -> int:
     return sum(message_tokens(m) for m in messages)
 
 
+def schemas_tokens(schemas: Optional[list[dict[str, Any]]]) -> int:
+    """Estimate tokens for the tools[] payload sent every LLM turn."""
+    if not schemas:
+        return 0
+    try:
+        return estimate_tokens(json.dumps(schemas, ensure_ascii=False))
+    except Exception:
+        return 0
+
+
+def context_budget_tokens(
+    messages: list[dict[str, Any]],
+    schemas: Optional[list[dict[str, Any]]] = None,
+    *,
+    overhead: int = 256,
+) -> int:
+    """Messages + tool schemas + small fixed overhead (closer to real API spend)."""
+    return messages_tokens(messages) + schemas_tokens(schemas) + overhead
+
+
 _COMPRESS_PROMPT = """You compress agent transcripts into durable working memory.
 
 Output EXACTLY these markdown sections:

@@ -12,6 +12,10 @@ backend/memory/**
 backend/workspace/**
 !backend/workspace/.gitkeep
 
+# User-installed skills (keep only the placeholder)
+backend/skills/**
+!backend/skills/.gitkeep
+
 # Python
 __pycache__/
 *.py[cod]

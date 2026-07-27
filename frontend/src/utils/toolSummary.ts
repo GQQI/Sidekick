@@ -36,8 +36,9 @@ export function formatToolSummary(name: string, args: unknown, fallback = ""): s
   if (name === "memory_write") return `覆写记忆（${str("content").length} 字符）`;
   if (name === "memory_read") return "读取记忆";
   if (name === "delegate_task") return `委派: ${short(str("goal") || str("task"), 80)}`;
+  if (name === "ask_user") return `询问用户: ${short(str("question"), 80)}`;
   if (name.startsWith("skill_")) return `调用技能 ${name}`;
-  for (const key of ["path", "command", "query", "name", "goal", "note"]) {
+  for (const key of ["path", "command", "query", "name", "goal", "note", "question"]) {
     if (str(key)) return `${name}: ${short(str(key), 80)}`;
   }
   return name || "tool";

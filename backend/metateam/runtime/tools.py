@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 
 from ..core.config import Settings
 from ..services.skills import Skill, load_skills
+from .ask import normalize_option_labels
 
 
 _LONG_RUNNING_RE = re.compile(
@@ -216,6 +217,7 @@ def build_registry(
     skills: list[Skill],
     allow_delegate: bool = True,
     run_child: Optional[Callable[..., str]] = None,
+    ask_user_fn: Optional[Callable[..., str]] = None,
 ) -> ToolRegistry:
     reg = ToolRegistry()
     ws = settings.workspace
@@ -546,6 +548,62 @@ def build_registry(
             parallel_safe=True,
         )
     )
+
+    if ask_user_fn is not None:
+
+        def ask_user(
+            question: str,
+            options: list[str],
+            allow_custom: bool = True,
+            custom_label: str = "其他（请补充）",
+        ) -> str:
+            return ask_user_fn(
+                question=question,
+                options=normalize_option_labels(options),
+                allow_custom=bool(allow_custom),
+                custom_label=custom_label or "其他（请补充）",
+            )
+
+        reg.register(
+            Tool(
+                "ask_user",
+                "Ask the user to clarify BEFORE continuing — at ANY point in a task "
+                "(after reading files, running commands, partial progress, etc.). "
+                "The UI shows clickable buttons; NEVER print numbered/lettered option "
+                "lists in assistant text. Provide question + options (array of 2–12 "
+                "short labels). Set allow_custom=true so the user can type a custom "
+                "answer. Wait for the result before continuing.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "Clear question explaining what you need.",
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 12,
+                            "description": "2–12 choice labels shown as buttons.",
+                        },
+                        "allow_custom": {
+                            "type": "boolean",
+                            "description": "Show a free-text 'other' field (default true).",
+                            "default": True,
+                        },
+                        "custom_label": {
+                            "type": "string",
+                            "description": "Label for the custom/other choice.",
+                            "default": "其他（请补充）",
+                        },
+                    },
+                    "required": ["question", "options"],
+                },
+                ask_user,
+                parallel_safe=False,
+            )
+        )
 
     if allow_delegate and run_child is not None:
 

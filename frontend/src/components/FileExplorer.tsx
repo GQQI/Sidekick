@@ -14,6 +14,7 @@ import {
   moveFsEntry,
   readFileContent,
   renameFsEntry,
+  revealFsEntry,
   type FsEntry,
 } from "../api";
 import { usePrefs } from "../prefs";
@@ -21,6 +22,7 @@ import { FileTypeIcon } from "./FileTypeIcon";
 import {
   IconCheck,
   IconChevronDown,
+  IconExternal,
   IconFile,
   IconFiles,
   IconFolder,
@@ -32,6 +34,8 @@ import {
 
 type Props = {
   rootName: string;
+  /** Absolute path of the active workspace (for tooltips / fallback). */
+  workspaceAbsPath?: string | null;
   collapsed: boolean;
   width: number;
   onToggle: () => void;
@@ -70,6 +74,7 @@ type CtxMenu = {
 
 export function FileExplorer({
   rootName,
+  workspaceAbsPath = null,
   collapsed,
   width,
   onToggle,
@@ -95,6 +100,27 @@ export function FileExplorer({
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
   const openClickTimer = useRef<number | null>(null);
+
+  function absPathFor(entry: Pick<FsEntry, "path" | "abs_path">): string {
+    if (entry.abs_path) return entry.abs_path;
+    const root = (workspaceAbsPath || "").replace(/[/\\]+$/, "");
+    if (!root) return entry.path;
+    if (!entry.path || entry.path === ".") return root;
+    const rel = entry.path.replace(/\\/g, "/").replace(/^\.\//, "");
+    const sep = root.includes("\\") ? "\\" : "/";
+    return `${root}${sep}${rel.replace(/\//g, sep)}`;
+  }
+
+  async function revealInOs(path: string) {
+    setCtxMenu(null);
+    try {
+      await revealFsEntry(path);
+    } catch (e) {
+      setActionError(
+        t("feRevealFail", e instanceof Error ? e.message : String(e)),
+      );
+    }
+  }
 
   const loadDir = useCallback(async (path: string) => {
     setDirs((prev) => ({ ...prev, [path]: { ...prev[path], loading: true, error: undefined } }));
@@ -637,7 +663,7 @@ export function FileExplorer({
                     type="button"
                     className={`fe-row${selected ? " selected" : ""}`}
                     draggable
-                    title={t("feDragHint")}
+                    title={absPathFor(e)}
                     onDragStart={(ev) => onDragStart(ev, e.path)}
                     onDragEnd={onDragEnd}
                     onClick={() => {
@@ -676,7 +702,7 @@ export function FileExplorer({
                 type="button"
                 className="fe-row"
                 draggable
-                title={t("feDragHint")}
+                title={absPathFor(e)}
                 onDragStart={(ev) => onDragStart(ev, e.path)}
                 onDragEnd={onDragEnd}
                 onClick={() => {
@@ -762,8 +788,22 @@ export function FileExplorer({
         className={`fe-root-label${selectedDir === "." ? " selected" : ""}${
           dropTarget === "." ? " drop-target" : ""
         }`}
-        title={`${rootName} · ${t("feDragHint")}`}
+        title={workspaceAbsPath || rootName}
         onClick={() => setSelectedDir(".")}
+        onContextMenu={(ev) => {
+          ev.preventDefault();
+          setCtxMenu({
+            x: ev.clientX,
+            y: ev.clientY,
+            entry: {
+              name: rootName,
+              path: ".",
+              abs_path: workspaceAbsPath || undefined,
+              type: "dir",
+            },
+            depth: -1,
+          });
+        }}
         onDragOver={(ev) => onDragOverDir(ev, ".")}
         onDragLeave={() => {
           if (dropTarget === ".") setDropTarget(null);
@@ -800,15 +840,25 @@ export function FileExplorer({
           <button
             type="button"
             role="menuitem"
-            onClick={() => {
-              const { entry, depth } = ctxMenu;
-              setCtxMenu(null);
-              startRename(entry, depth);
-            }}
+            onClick={() => void revealInOs(ctxMenu.entry.path)}
           >
-            <IconFiles size={14} />
-            <span>{t("feRename")}</span>
+            <IconExternal size={14} />
+            <span>{t("feRevealInOs")}</span>
           </button>
+          {ctxMenu.depth >= 0 && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                const { entry, depth } = ctxMenu;
+                setCtxMenu(null);
+                startRename(entry, depth);
+              }}
+            >
+              <IconFiles size={14} />
+              <span>{t("feRename")}</span>
+            </button>
+          )}
           {ctxMenu.entry.type === "dir" && (
             <button
               type="button"
@@ -817,7 +867,7 @@ export function FileExplorer({
                 const { entry, depth } = ctxMenu;
                 setCtxMenu(null);
                 setSelectedDir(entry.path);
-                startCreate(entry.path, "file", depth + 1);
+                startCreate(entry.path, "file", Math.max(0, depth) + 1);
               }}
             >
               <IconPlus size={14} />

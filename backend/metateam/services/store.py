@@ -28,6 +28,17 @@ def is_untitled_session(title: str) -> bool:
     return (title or "").strip() in _UNTITLED_TITLES
 
 
+def _is_internal_message(m: dict[str, Any]) -> bool:
+    """Hide Sidekick-injected prompts (plan steps, etc.) from the UI transcript."""
+    if m.get("sidekick_internal") or m.get("internal"):
+        return True
+    meta = m.get("sidekick")
+    if isinstance(meta, dict) and meta.get("internal"):
+        return True
+    content = str(m.get("content") or "").lstrip()
+    return content.startswith("[Plan step ") or content.startswith("[sidekick:")
+
+
 def _is_skill_or_command_message(content: str) -> bool:
     text = (content or "").strip()
     if not text:
@@ -53,7 +64,7 @@ def _summarize_title(content: str, limit: int = 20) -> str:
 
 def _title_from_messages(messages: list[dict[str, Any]], fallback: str = "New chat") -> str:
     for m in messages:
-        if m.get("role") != "user":
+        if m.get("role") != "user" or _is_internal_message(m):
             continue
         title = _summarize_title(str(m.get("content") or ""))
         if title:
@@ -114,6 +125,31 @@ class SessionStore:
             return False
         return sess.agent.approval.decide(approval_id, approved, remember=remember)
 
+    def answer_ask(
+        self,
+        session_id: str,
+        ask_id: str,
+        *,
+        choice: str,
+        text: str = "",
+        option_label: str = "",
+    ) -> bool:
+        sess = self.get(session_id)
+        if not sess:
+            return False
+        return sess.agent.ask.answer(
+            ask_id,
+            choice=choice,
+            text=text,
+            option_label=option_label,
+        )
+
+    def decide_plan(self, session_id: str, plan_id: str, approved: bool) -> bool:
+        sess = self.get(session_id)
+        if not sess:
+            return False
+        return sess.agent.plan_gate.decide(plan_id, approved)
+
     def get(self, session_id: str) -> Optional[ChatSession]:
         with self._lock:
             hit = self._sessions.get(session_id)
@@ -161,7 +197,11 @@ class SessionStore:
             try:
                 meta, messages = load_session(path)
                 sid = meta.id or path.stem
-                user_count = sum(1 for m in messages if m.get("role") == "user")
+                user_count = sum(
+                    1
+                    for m in messages
+                    if m.get("role") == "user" and not _is_internal_message(m)
+                )
                 mtime = path.stat().st_mtime
                 updated = mtime
                 if meta.updated_at:
@@ -211,7 +251,11 @@ class SessionStore:
                 "created_at": s.created_at,
                 "updated_at": updated,
                 "messages": len(s.agent.messages),
-                "user_turns": sum(1 for m in s.agent.messages if m.get("role") == "user"),
+                "user_turns": sum(
+                    1
+                    for m in s.agent.messages
+                    if m.get("role") == "user" and not _is_internal_message(m)
+                ),
                 "demo": s.agent.settings.demo_mode,
                 "source": "memory",
             }
@@ -263,7 +307,7 @@ class SessionStore:
         count = 0
         cut = len(msgs)
         for i, m in enumerate(msgs):
-            if m.get("role") == "user":
+            if m.get("role") == "user" and not _is_internal_message(m):
                 if count == keep_user_turns:
                     cut = i
                     break
@@ -295,13 +339,15 @@ class SessionStore:
         for m in sess.agent.messages:
             role = m.get("role")
             if role == "user":
+                if _is_internal_message(m):
+                    continue
                 content = str(m.get("content") or "").strip()
                 if content and not content.startswith("Iteration budget exhausted"):
                     out.append({"role": "user", "content": content})
             elif role == "assistant":
                 content = str(m.get("content") or "").strip()
-                # Skip tool-call-only stubs
-                if content and not m.get("tool_calls"):
+                # Skip tool-call-only stubs and internal bookkeeping notes
+                if content and not m.get("tool_calls") and not _is_internal_message(m):
                     out.append({"role": "assistant", "content": content})
         return out
 

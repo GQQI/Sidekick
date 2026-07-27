@@ -96,6 +96,7 @@ export type SessionDetail = {
   title: string;
   messages: { role: string; content: string }[];
   tokens: number;
+  limit?: number;
   demo: boolean;
 };
 
@@ -200,6 +201,8 @@ export const saveSession = (id: string) =>
 export type FsEntry = {
   name: string;
   path: string;
+  /** Absolute path on the host machine (when provided by the API). */
+  abs_path?: string;
   type: "file" | "dir";
   size?: number | null;
   kind?: string;
@@ -300,6 +303,16 @@ export const moveFsEntry = (path: string, destDir: string) =>
     body: JSON.stringify({ path, dest_dir: destDir }),
   });
 
+export const revealFsEntry = (path: string) =>
+  json<{ status: string; path: string; abs_path: string; type: string }>(
+    "/api/files/reveal",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    },
+  );
+
 export const decideApproval = (
   sessionId: string,
   approvalId: string,
@@ -312,6 +325,36 @@ export const decideApproval = (
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ approved, remember }),
+    },
+  );
+
+export const answerAsk = (
+  sessionId: string,
+  askId: string,
+  choice: string,
+  text = "",
+  optionLabel = "",
+) =>
+  json<{ status: string; ask_id: string; choice: string }>(
+    `/api/sessions/${sessionId}/asks/${askId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        choice,
+        text,
+        option_label: optionLabel,
+      }),
+    },
+  );
+
+export const confirmPlan = (sessionId: string, planId: string, approved: boolean) =>
+  json<{ status: string; plan_id: string; approved: boolean }>(
+    `/api/sessions/${sessionId}/plans/${planId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved }),
     },
   );
 
@@ -357,13 +400,14 @@ export async function streamChat(
   sessionId: string | null,
   handlers: ChatHandlers,
   signal?: AbortSignal,
+  mode: "plan" | "agent" = "agent",
 ): Promise<string | null> {
   let r: Response;
   try {
     r = await fetch(`${BASE}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ message, session_id: sessionId }),
+      body: JSON.stringify({ message, session_id: sessionId, mode }),
       signal,
     });
   } catch (e) {

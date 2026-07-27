@@ -65,7 +65,8 @@ class Settings:
     tool_result_cap: int = int(os.getenv("META_TOOL_RESULT_CAP", "18000"))
 
     review_every_n_turns: int = int(os.getenv("META_REVIEW_EVERY", "6"))
-    auto_skill_review: bool = field(default_factory=lambda: _bool("META_AUTO_REVIEW", True))
+    # Off by default — silent review burns tokens and can mutate MEMORY/skills
+    auto_skill_review: bool = field(default_factory=lambda: _bool("META_AUTO_REVIEW", False))
 
     root: Path = BACKEND_ROOT
     workspace: Path = field(default_factory=lambda: BACKEND_ROOT / "workspace")
@@ -81,7 +82,7 @@ class Settings:
     port: int = int(os.getenv("META_PORT", "8787"))
 
     provider: str = "deepseek"
-    reasoning_effort: str = "high"
+    reasoning_effort: str = "medium"
     thinking_enabled: bool = True
     temperature: float = 0.2
 

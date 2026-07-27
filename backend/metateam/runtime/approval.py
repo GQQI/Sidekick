@@ -167,9 +167,12 @@ def summarize_tool_call(name: str, args: dict[str, Any]) -> str:
     if name == "delegate_task":
         goal = str(args.get("goal") or args.get("task") or "")
         return f"委派: {_short(goal, 80)}"
+    if name == "ask_user":
+        q = str(args.get("question") or "")
+        return f"询问用户: {_short(q, 80)}"
     if name.startswith("skill_"):
         return f"调用技能 {name}"
-    for key in ("path", "command", "query", "name", "goal", "note"):
+    for key in ("path", "command", "query", "name", "goal", "note", "question"):
         if key in args and args[key]:
             return f"{name}: {_short(str(args[key]), 80)}"
     return name
