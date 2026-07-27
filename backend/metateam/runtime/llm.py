@@ -105,7 +105,9 @@ class LLM:
         content = extract_content_text(msg)
         reasoning = extract_reasoning_text(msg)
         content, tagged = split_think_tags(content)
-        reasoning = f"{reasoning}{tagged}"
+        # Native reasoning already present → do not append tagged duplicates
+        if tagged and not reasoning:
+            reasoning = tagged
 
         out: dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning:
@@ -184,13 +186,18 @@ class LLM:
                     reasoning_parts.append(reasoning_piece)
                     yield ("reasoning_delta", reasoning_piece)
 
-                # 2) Visible content, with <think> tags peeled into reasoning
+                # 2) Visible content, with <think> tags peeled into reasoning.
+                # If this delta already carried native reasoning, only emit
+                # visible content — do not also treat tagged content as
+                # reasoning (avoids NowNow / let let duplication).
                 content_piece = extract_content_text(delta)
                 if content_piece:
                     for kind, piece in tag_split.feed(content_piece):
                         if not piece:
                             continue
                         if kind == "reasoning":
+                            if reasoning_piece:
+                                continue
                             reasoning_parts.append(piece)
                             yield ("reasoning_delta", piece)
                         else:
@@ -324,16 +331,28 @@ def extract_content_text(msg: Any) -> str:
 
 
 def extract_reasoning_text(msg: Any) -> str:
-    """Model thinking / reasoning stream pieces only."""
+    """Model thinking / reasoning stream pieces only.
+
+    Providers often expose the same chunk on multiple fields
+    (e.g. reasoning_content + model_extra['reasoning_content']).
+    Take the first non-empty source only — never concatenate duplicates.
+    """
     if msg is None:
         return ""
-    parts: list[str] = []
-    for attr in ("reasoning_content", "reasoning", "thinking"):
-        v = getattr(msg, attr, None)
+
+    def _as_text(v: Any) -> str:
         if isinstance(v, str) and v:
-            parts.append(v)
+            return v
+        return ""
+
+    for attr in ("reasoning_content", "reasoning", "thinking"):
+        text = _as_text(getattr(msg, attr, None))
+        if text:
+            return text
+
     content = getattr(msg, "content", None)
     if isinstance(content, list):
+        parts: list[str] = []
         for p in content:
             if isinstance(p, dict):
                 ptype = str(p.get("type") or "")
@@ -345,13 +364,16 @@ def extract_reasoning_text(msg: Any) -> str:
                     t = getattr(p, "text", None)
                     if t:
                         parts.append(str(t))
+        if parts:
+            return "".join(parts)
+
     extra = getattr(msg, "model_extra", None)
     if isinstance(extra, dict):
         for k in ("reasoning_content", "reasoning", "thinking"):
-            v = extra.get(k)
-            if isinstance(v, str) and v:
-                parts.append(v)
-    return "".join(parts)
+            text = _as_text(extra.get(k))
+            if text:
+                return text
+    return ""
 
 
 def extract_message_text(msg: Any) -> str:

@@ -498,6 +498,8 @@ export function App() {
   const streamIdRef = useRef<string | null>(null);
   const streamTextRef = useRef("");
   const streamReasoningRef = useRef("");
+  /** True once a native reasoning_content / reasoning delta arrived this turn. */
+  const nativeReasoningRef = useRef(false);
   const thinkSplitRef = useRef(new ThinkTagSplitter());
   const abortRef = useRef<AbortController | null>(null);
   const stoppingRef = useRef(false);
@@ -664,6 +666,7 @@ export function App() {
     streamIdRef.current = null;
     streamTextRef.current = "";
     streamReasoningRef.current = "";
+    nativeReasoningRef.current = false;
   }
 
   function ensureStreamBubble(reset: boolean) {
@@ -673,6 +676,7 @@ export function App() {
       streamIdRef.current = id;
       streamTextRef.current = "";
       streamReasoningRef.current = "";
+      nativeReasoningRef.current = false;
       thinkSplitRef.current.reset();
       appendMsg({
         id,
@@ -699,10 +703,15 @@ export function App() {
   function appendStreamChunk(chunk: string, reset = false) {
     ensureStreamBubble(reset);
     if (!chunk) return;
-    // Peel <think>…</think> out of content (models that embed thinking in content)
+    // Peel <think>…</think> out of content (models that embed thinking in content).
+    // Skip tagged pieces once native reasoning_content has started this turn.
     for (const p of thinkSplitRef.current.feed(chunk)) {
-      if (p.kind === "reasoning") streamReasoningRef.current += p.text;
-      else streamTextRef.current += p.text;
+      if (p.kind === "reasoning") {
+        if (nativeReasoningRef.current) continue;
+        streamReasoningRef.current += p.text;
+      } else {
+        streamTextRef.current += p.text;
+      }
     }
     syncStreamBubble();
   }
@@ -711,6 +720,7 @@ export function App() {
     ensureStreamBubble(reset);
     if (!chunk) return;
     // Native reasoning_content / reasoning field
+    nativeReasoningRef.current = true;
     streamReasoningRef.current += chunk;
     syncStreamBubble();
   }
@@ -746,7 +756,10 @@ export function App() {
     if (/<\/?think/i.test(body)) {
       const peeled = splitThinkTags(body);
       body = peeled.content.trim();
-      if (peeled.reasoning) reasoning = `${reasoning}${peeled.reasoning}`.trim();
+      // Prefer native reasoning; only keep tagged peel when none was streamed.
+      if (peeled.reasoning && !nativeReasoningRef.current) {
+        reasoning = `${reasoning}${peeled.reasoning}`.trim();
+      }
     }
     if (!body && !opts?.stopped) {
       body = t("emptyRoundOutput");
@@ -769,6 +782,7 @@ export function App() {
     streamIdRef.current = null;
     streamTextRef.current = "";
     streamReasoningRef.current = "";
+    nativeReasoningRef.current = false;
   }
 
   async function refreshSessions(page?: number) {
@@ -820,6 +834,7 @@ export function App() {
     streamIdRef.current = null;
     streamTextRef.current = "";
     streamReasoningRef.current = "";
+    nativeReasoningRef.current = false;
     setLive([]);
     setSubs([]);
   }
@@ -1274,6 +1289,7 @@ export function App() {
     streamIdRef.current = null;
     streamTextRef.current = "";
     streamReasoningRef.current = "";
+    nativeReasoningRef.current = false;
     commit([]);
     setLive([]);
     setSubs([]);
@@ -1812,6 +1828,7 @@ export function App() {
     streamIdRef.current = null;
     streamTextRef.current = "";
     streamReasoningRef.current = "";
+    nativeReasoningRef.current = false;
     thinkSplitRef.current.reset();
     if (showUser) {
       const displayText =
