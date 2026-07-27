@@ -1641,7 +1641,7 @@ html[data-theme="dark"] .inline-approval {
 }
 
 .inline-ask {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   position: relative;
   z-index: 12;
   margin: 0 12px 10px;
@@ -1650,6 +1650,12 @@ html[data-theme="dark"] .inline-approval {
   border-radius: 12px;
   background: var(--panel, #fff);
   box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  max-height: min(62vh, 520px);
+  overflow: hidden;
 }
 
 html[data-theme="dark"] .inline-ask {
@@ -1657,19 +1663,55 @@ html[data-theme="dark"] .inline-ask {
   border-color: var(--border, #333842);
 }
 
+.inline-ask-top {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+
 .inline-ask-title {
+  flex: 0 0 auto;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--muted, #6b7280);
-  margin-bottom: 6px;
 }
 
 .inline-ask-question {
-  margin: 0 0 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding-right: 4px;
   font-size: 14px;
   line-height: 1.5;
-  white-space: pre-wrap;
+}
+
+.inline-ask-question .markdown {
+  font-size: 14px;
+}
+
+.inline-ask-question .markdown h1,
+.inline-ask-question .markdown h2,
+.inline-ask-question .markdown h3 {
+  font-size: 1.05em;
+}
+
+.inline-ask-footer {
+  flex: 0 0 auto;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border, #d8dde6);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: min(46vh, 280px);
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .inline-ask-options {

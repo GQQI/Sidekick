@@ -61,6 +61,7 @@ import {
 import { loadActiveSessionId, saveActiveSessionId } from "./sessionPersist";
 import { MarkdownView } from "./components/MarkdownView";
 import { usePrefs } from "./prefs";
+import { AskDialog } from "./components/AskDialog";
 import { SlashMenu } from "./components/SlashMenu";
 import { TaskPlanPanel, type ActivePlan, type PlanTask, type PlanTaskStatus } from "./components/TaskPlanPanel";
 import { PlanConfirmDialog } from "./components/PlanConfirmDialog";
@@ -696,12 +697,18 @@ export function App() {
   function stripDuplicateAskBubble(question: string) {
     discardStreamBubble();
     const q = question.trim();
+    const qHead = q.slice(0, Math.min(80, q.length));
     for (let i = transcriptRef.current.length - 1; i >= 0; i--) {
       const m = transcriptRef.current[i];
       if (m.role !== "assistant") continue;
+      if (m.tool) break;
       const text = (m.content || "").trim();
       if (!text) break;
-      const sameQuestion = Boolean(q && text.includes(q.slice(0, Math.min(48, q.length))));
+      const sameQuestion = Boolean(
+        qHead &&
+          (text.includes(qHead) ||
+            (text.length >= 24 && q.includes(text.slice(0, Math.min(80, text.length))))),
+      );
       if (looksLikeOptionList(text) || sameQuestion) {
         commit(transcriptRef.current.filter((x) => x.id !== m.id));
       }
@@ -772,8 +779,11 @@ export function App() {
       if (discard) discardStreamBubble();
       else sealStreamBubble();
     }
+    if (!chunk) {
+      if (!discard) ensureStreamBubble(false);
+      return;
+    }
     ensureStreamBubble(false);
-    if (!chunk) return;
     // Peel <think>…</think> out of content (models that embed thinking in content).
     // Skip tagged pieces once native reasoning_content has started this turn.
     for (const p of thinkSplitRef.current.feed(chunk)) {
@@ -3364,56 +3374,29 @@ export function App() {
             </div>
           )}
           {askPrompt && (
-            <div className="inline-ask" role="dialog" aria-label={t("askDialog")}>
-              <div className="inline-ask-top">
-                <div className="inline-ask-title">{t("askNeeded")}</div>
-                <p className="inline-ask-question">{askPrompt.question}</p>
-              </div>
-              <div className="inline-ask-options">
-                {askPrompt.options.map((o) => (
-                  <button
-                    key={o.key}
-                    type="button"
-                    className={`ask-option${askChoice === o.key ? " active" : ""}`}
-                    onClick={() => {
-                      setAskChoice(o.key);
-                      void resolveAsk(o.key);
-                    }}
-                    disabled={askSubmitting}
-                  >
-                    <span className="ask-key">{o.key}</span>
-                    <span className="ask-label">{o.label}</span>
-                  </button>
-                ))}
-              </div>
-              {askPrompt.allowCustom && (
-              <div className="inline-ask-other">
-                <div className="inline-ask-other-label">{askPrompt.customLabel}</div>
-                <div className="inline-ask-other-form">
-                  <textarea
-                    className="inline-ask-textarea"
-                    rows={3}
-                    placeholder={t("askOtherPlaceholder")}
-                    value={askOtherText}
-                    onChange={(e) => {
-                      setAskChoice(ASK_CUSTOM_KEY);
-                      setAskOtherText(e.target.value);
-                    }}
-                    onFocus={() => setAskChoice(ASK_CUSTOM_KEY)}
-                    disabled={askSubmitting}
-                  />
-                  <button
-                    type="button"
-                    className="approval-btn allow"
-                    disabled={askSubmitting}
-                    onClick={() => void resolveAsk(ASK_CUSTOM_KEY, askOtherText)}
-                  >
-                    {t("askSubmit")}
-                  </button>
-                </div>
-              </div>
-              )}
-            </div>
+            <AskDialog
+              question={askPrompt.question}
+              options={askPrompt.options}
+              allowCustom={askPrompt.allowCustom}
+              customLabel={askPrompt.customLabel}
+              choice={askChoice}
+              otherText={askOtherText}
+              submitting={askSubmitting}
+              titleLabel={t("askNeeded")}
+              dialogLabel={t("askDialog")}
+              submitLabel={t("askSubmit")}
+              otherPlaceholder={t("askOtherPlaceholder")}
+              onPick={(key) => {
+                setAskChoice(key);
+                void resolveAsk(key);
+              }}
+              onOtherChange={(text) => {
+                setAskChoice(ASK_CUSTOM_KEY);
+                setAskOtherText(text);
+              }}
+              onOtherFocus={() => setAskChoice(ASK_CUSTOM_KEY)}
+              onSubmitCustom={() => void resolveAsk(ASK_CUSTOM_KEY, askOtherText)}
+            />
           )}
           <form
             className="composer"
