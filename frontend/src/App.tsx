@@ -2129,7 +2129,14 @@ export function App() {
   async function applyModel() {
     if (!model) return;
     const patch: Partial<ModelConfig> = { ...model };
-    if (apiKeyDraft.trim()) patch.api_key = apiKeyDraft.trim();
+    const key = apiKeyDraft.trim();
+    if (key) {
+      patch.api_key = key;
+      // Leaving demo_mode:true from a previous empty-key state would keep the stub LLM
+      patch.demo_mode = false;
+    } else if (patch.demo_mode) {
+      patch.api_key = "";
+    }
     if (!String(patch.subagent_model || "").trim()) {
       patch.subagent_model = patch.model;
     }

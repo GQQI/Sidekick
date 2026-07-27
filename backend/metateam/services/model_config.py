@@ -50,7 +50,8 @@ class ModelConfig:
         else:
             d["api_key_masked"] = ""
             d["api_key_set"] = bool(key)
-        # never echo full key to list UIs by default — include for authenticated local UI
+        # Do not echo the raw key to the browser; blank draft + api_key_set keeps the stored key
+        d["api_key"] = ""
         return d
 
 
@@ -84,8 +85,10 @@ def load_model_config() -> ModelConfig:
         except Exception:
             pass
 
-    # empty key → demo
-    if not str(data.get("api_key") or "").strip():
+    # Key present → real API mode. Empty key → demo. Never keep stale demo_mode=true with a key.
+    if str(data.get("api_key") or "").strip():
+        data["demo_mode"] = False
+    else:
         data["demo_mode"] = True
 
     return ModelConfig(**{k: data.get(k, DEFAULTS[k]) for k in DEFAULTS})
@@ -93,6 +96,11 @@ def load_model_config() -> ModelConfig:
 
 def save_model_config(cfg: ModelConfig) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Normalize before persist so UI/file never disagree
+    if str(cfg.api_key or "").strip():
+        cfg.demo_mode = False
+    else:
+        cfg.demo_mode = True
     CONFIG_PATH.write_text(
         json.dumps(asdict(cfg), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -107,7 +115,8 @@ def apply_to_settings(settings: Any, cfg: ModelConfig | None = None) -> Any:
     settings.subagent_model = cfg.subagent_model or cfg.model
     settings.compress_model = cfg.compress_model or cfg.model
     settings.review_model = cfg.review_model or cfg.model
-    settings.demo_mode = bool(cfg.demo_mode) or not bool(cfg.api_key.strip())
+    # API key always wins over a leftover demo_mode flag from older saves / UI patches
+    settings.demo_mode = not bool(str(cfg.api_key or "").strip())
     settings.reasoning_effort = cfg.reasoning_effort
     settings.thinking_enabled = bool(cfg.thinking_enabled)
     settings.temperature = float(cfg.temperature)
@@ -122,7 +131,13 @@ def update_model_config(patch: dict[str, Any]) -> ModelConfig:
             continue  # keep existing
         if hasattr(cfg, k):
             setattr(cfg, k, v)
-    if not cfg.api_key.strip():
+    # Explicit demo preset: clear key. Otherwise a non-empty key exits demo.
+    if patch.get("demo_mode") is True and not str(patch.get("api_key") or cfg.api_key or "").strip():
+        cfg.api_key = ""
+        cfg.demo_mode = True
+    elif str(cfg.api_key or "").strip():
+        cfg.demo_mode = False
+    else:
         cfg.demo_mode = True
     save_model_config(cfg)
     return cfg

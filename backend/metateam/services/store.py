@@ -68,7 +68,24 @@ class SessionStore:
         self._sessions: dict[str, ChatSession] = {}
 
     def refresh_settings(self) -> Settings:
+        """Reload global model settings and rebind live session agents (LLM clients)."""
         self.settings = reload_settings()
+        from ..runtime.llm import LLM
+        from .model_config import apply_to_settings, load_model_config
+
+        cfg = load_model_config()
+        with self._lock:
+            sessions = list(self._sessions.values())
+        for sess in sessions:
+            try:
+                apply_to_settings(sess.agent.settings, cfg)
+                # Rebuild clients so demo→API (or model/base_url changes) take effect
+                sess.agent.llm = LLM(sess.agent.settings)
+                sess.agent.compress_llm = LLM(
+                    sess.agent.settings, model=sess.agent.settings.compress_model
+                )
+            except Exception:
+                pass
         return self.settings
 
     def create(self) -> ChatSession:

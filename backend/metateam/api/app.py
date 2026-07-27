@@ -321,10 +321,15 @@ def put_model(body: ModelUpdate) -> dict[str, Any]:
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
     cfg = update_model_config(patch)
     STORE.refresh_settings()
+    mode = "demo" if cfg.demo_mode else "api"
     return {
         "status": "ok",
         "config": cfg.masked(),
-        "note": "已生效于新会话；请点「新会话」后继续聊天。",
+        "note": (
+            "已保存（Demo 模式）。"
+            if cfg.demo_mode
+            else f"已保存并生效（{mode} · {cfg.model}）。"
+        ),
     }
 
 
