@@ -1,20 +1,20 @@
 # Secrets & local env
 .env
-backend/data/model.json
-backend/data/workspace.json
+data/model.json
+data/workspace.json
 
 # Runtime data (do not commit)
-backend/sessions/*
-!backend/sessions/.gitkeep
-backend/data/fs_undo/
-backend/memory/**
-!backend/memory/MEMORY.md
-backend/workspace/**
-!backend/workspace/.gitkeep
+sessions/*
+!sessions/.gitkeep
+data/fs_undo/
+memory/**
+!memory/MEMORY.md
+workspace/**
+!workspace/.gitkeep
 
 # User-installed skills (keep only the placeholder)
-backend/skills/**
-!backend/skills/.gitkeep
+skills/**
+!skills/.gitkeep
 
 # Python
 __pycache__/
@@ -25,9 +25,10 @@ venv/
 .pytest_cache/
 *.log
 
-# Frontend
-frontend/node_modules/
-frontend/dist/
+# UI
+ui/node_modules/
+ui/dist/
+frontend/
 
 # OS / editor
 .DS_Store
