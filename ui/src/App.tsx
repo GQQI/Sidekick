@@ -136,7 +136,7 @@ function roleIcon(role: string) {
   const r = role.toLowerCase();
   if (r.includes("research") || r.includes("调研") || r.includes("搜索"))
     return <IconBinoculars size={15} />;
-  if (r.includes("code") || r.includes("coder") || r.includes("编码") || r.includes("开�?))
+  if (r.includes("code") || r.includes("coder") || r.includes("编码") || r.includes("开发"))
     return <IconBraces size={15} />;
   if (r.includes("tool") || r.includes("工具")) return <IconCube size={15} />;
   return <IconRobot size={15} />;
@@ -171,7 +171,7 @@ export function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
   const [activeWs, setActiveWs] = useState<{ path: string; name: string } | null>(null);
   const [wsBusy, setWsBusy] = useState(false);
-  /** False until health + workspace state are known �?avoids welcome flash on refresh. */
+  /** False until health + workspace state are known — avoids welcome flash on refresh. */
   const [bootReady, setBootReady] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionsPage, setSessionsPage] = useState(1);
@@ -330,7 +330,7 @@ export function App() {
     };
     setQueuedState([...queuedRef.current, item]);
     setInput("");
-    setToast("已加入队列，当前任务结束后发�?);
+    setToast("已加入队列，当前任务结束后发送。");
   }
 
   function removeQueued(id: string) {
@@ -388,7 +388,7 @@ export function App() {
   function looksLikeOptionList(text: string): boolean {
     const lines = text
       .split("\n")
-      .filter((line) => /^\s*(\d+|[A-Za-z])[\.\)�?：]\s*.+/.test(line));
+      .filter((line) => /^\s*(\d+|[A-Za-z])[\.\)、：]\s*.+/.test(line));
     return lines.length >= 2;
   }
 
@@ -494,7 +494,7 @@ export function App() {
       return;
     }
     ensureStreamBubble(false);
-    // Peel <think>�?/think> out of content (models that embed thinking in content).
+    // Peel <think>…</think> out of content (models that embed thinking in content).
     // Skip tagged pieces once native reasoning_content has started this turn.
     for (const p of thinkSplitRef.current.feed(chunk)) {
       if (p.kind === "reasoning") {
@@ -527,7 +527,7 @@ export function App() {
     const id = streamIdRef.current;
     const streamed = streamTextRef.current.trim();
     const incoming = (text || "").trim();
-    const placeholder = "（已停止�?;
+    const placeholder = "（已停止）";
     let body: string;
     if (opts?.stopped) {
       // Prefer already-streamed UI text; never replace it with the stop placeholder
@@ -638,7 +638,7 @@ export function App() {
       try {
         if (await tryOpen(saved)) return;
       } catch {
-        /* deleted or corrupt �?fall through */
+        /* deleted or corrupt — fall through */
       }
     }
 
@@ -663,7 +663,7 @@ export function App() {
   }
 
   async function boot() {
-    // Load health + workspace together, then apply in one paint �?otherwise
+    // Load health + workspace together, then apply in one paint — otherwise
     // setHealth alone makes needsWorkspace true and flashes the welcome gate.
     const [h, w] = await Promise.all([fetchHealth(), fetchWorkspaces()]);
     const wsPath = w.active?.path || null;
@@ -820,7 +820,7 @@ export function App() {
   }
 
   const brandSub = useMemo(() => {
-    if (!health) return "启动中�?;
+    if (!health) return "启动中…";
     if (model?.demo_mode || health.demo) return "Demo";
     const ref = modelSwitchRole === "subagent" ? model?.subagent : model?.main;
     const label = modelLabel(model, ref);
@@ -1029,7 +1029,7 @@ export function App() {
     }
     const def = resolveSlashRoute(name);
     if (!def) {
-      postSystem(`未知命令 \`/${name}\`。输�?\`/help\` 查看可用命令。`);
+      postSystem(`未知命令 \`/${name}\`。输入 \`/help\` 查看可用命令。`);
       return true;
     }
 
@@ -1074,7 +1074,7 @@ export function App() {
         }
         try {
           const res = await saveSession(sessionId);
-          postSystem(`会话已保�?{res.path ? `：\`${res.path}\`` : ""}`);
+          postSystem(`会话已保存${res.path ? `：\`${res.path}\`` : ""}`);
           await refreshSessions();
         } catch (e) {
           setToast(e instanceof Error ? e.message : String(e));
@@ -1089,12 +1089,12 @@ export function App() {
               return s;
             });
         if (!list.length) {
-          postSystem("暂无 Skills。可�?`skills/` 下添�?`SKILL.md`�?);
+          postSystem("暂无 Skills。可在 `skills/` 下添加 `SKILL.md`。");
         } else {
           const body = [
-            `�?${list.length} �?Skill（输�?\`/skill <名称>\` 调用）：`,
+            `共 ${list.length} 个 Skill（输入 \`/skill <名称>\` 调用）：`,
             "",
-            ...list.map((s) => `- **${s.name}** · \`${s.tool}\`\n  ${s.description || "（无描述�?}`),
+            ...list.map((s) => `- **${s.name}** · \`${s.tool}\`\n  ${s.description || "（无描述）"}`),
           ].join("\n");
           postSystem(body);
         }
@@ -1102,7 +1102,7 @@ export function App() {
       }
       case "skill": {
         if (!args) {
-          postSystem("用法：`/skill <名称>`。先�?`/skills` 查看列表�?);
+          postSystem("用法：`/skill <名称>`。先用 `/skills` 查看列表。");
           return true;
         }
         let sk = findSkill(args);
@@ -1122,14 +1122,14 @@ export function App() {
           }
         }
         if (!sk) {
-          postSystem(`未找�?Skill：\`${args}\`。输�?\`/skills\` 查看全部。`);
+          postSystem(`未找到 Skill：\`${args}\`。输入 \`/skills\` 查看全部。`);
           return true;
         }
         try {
           const detail = await fetchSkill(sk.name);
           const body = (detail.body || "").trim();
           const prompt = [
-            `### 【Skill 已注入�?{detail.name}`,
+            `### 【Skill 已注入】${detail.name}`,
             "",
             `请立即按下列 Skill 执行（对应工具名：\`${detail.tool}\`）。`,
             `若工具列表中存在 \`${detail.tool}\`，请优先调用它（可带 task 参数）；否则直接严格遵循正文扮演/执行，不要声称「没有这个技能」。`,
@@ -1137,25 +1137,25 @@ export function App() {
             "----- SKILL START -----",
             "",
             body.slice(0, 24000),
-            body.length > 24000 ? "\n�?truncated)" : "",
+            body.length > 24000 ? "\n…(truncated)" : "",
             "",
             "----- SKILL END -----",
             "",
-            "现在开始：用该 Skill 的视�?流程回应用户接下来的需求。若上文已有用户问题，直接针对它输出�?,
+            "现在开始：用该 Skill 的视角与流程回应用户接下来的需求。若上文已有用户问题，直接针对它输出。",
           ].join("\n");
           if (busyRef.current) {
             enqueueMessage(prompt);
-            setToast("Skill 已加入队列，当前任务结束后执�?);
+            setToast("Skill 已加入队列，当前任务结束后执行。");
           } else {
             // Show the injected Skill body in the thread (Markdown), same as history restore.
             await sendChat(prompt, { showUser: true });
           }
         } catch (e) {
           postSystem(
-            `加载 Skill 失败�?{e instanceof Error ? e.message : String(e)}。也可让模型直接调用 \`${sk.tool}\`。`,
+            `加载 Skill 失败：${e instanceof Error ? e.message : String(e)}。也可让模型直接调用 \`${sk.tool}\`。`,
           );
-          if (busyRef.current) enqueueMessage(`请调用函数工�?${sk.tool} 并严格执行返回的流程。`);
-          else await sendChat(`请调用函数工�?${sk.tool} 并严格执行返回的流程。`, { showUser: false });
+          if (busyRef.current) enqueueMessage(`请调用函数工具 ${sk.tool} 并严格执行返回的流程。`);
+          else await sendChat(`请调用函数工具 ${sk.tool} 并严格执行返回的流程。`, { showUser: false });
         }
         return true;
       }
@@ -1168,15 +1168,15 @@ export function App() {
         if (sub === "refresh") {
           const text = await fetchMemory();
           setMemory(text);
-          setToast("记忆已刷�?);
+          setToast("记忆已刷新。");
           return true;
         }
         const text = (await fetchMemory()).trim();
         setMemory(text);
         postSystem(
           text
-            ? `当前记忆（MEMORY.md）：\n\n\`\`\`md\n${text.slice(0, 6000)}${text.length > 6000 ? "\n�? : ""}\n\`\`\`\n\n输入 \`/memory edit\` 打开编辑。`
-            : "记忆为空。输�?`/memory edit` 打开编辑�?,
+            ? `当前记忆（MEMORY.md）：\n\n\`\`\`md\n${text.slice(0, 6000)}${text.length > 6000 ? "\n…" : ""}\n\`\`\`\n\n输入 \`/memory edit\` 打开编辑。`
+            : "记忆为空。输入 `/memory edit` 打开编辑。",
         );
         return true;
       }
@@ -1192,18 +1192,18 @@ export function App() {
       case "stats":
         postSystem(
           [
-            `**上下�?* ${ctx.tokens} / ${ctx.limit} tokens�?{Math.min(100, Math.round((ctx.tokens / Math.max(1, ctx.limit)) * 100))}%）`,
+            `**上下文** ${ctx.tokens} / ${ctx.limit} tokens（{Math.min(100, Math.round((ctx.tokens / Math.max(1, ctx.limit)) * 100))}%）`,
             `**迭代** ${stats.iters}`,
-            `**模型** ${health?.model || modelLabel(model, model?.main) || "�?}`,
-            `**工作�?* ${activeWs?.path || "未选择"}`,
-            `**会话** ${sessionId || "�?}`,
+            `**模型** ${health?.model || modelLabel(model, model?.main) || "—"}`,
+            `**工作区** ${activeWs?.path || "未选择"}`,
+            `**会话** ${sessionId || "—"}`,
           ].join("\n"),
         );
         return true;
       case "files":
         setSidePanel("files");
         setExplorerCollapsed(false);
-        setToast("已展开文件浏览�?);
+        setToast("已展开文件浏览器。");
         return true;
       case "settings":
         openSettings(args === "model" ? "model" : args === "memory" ? "memory" : "workspace");
@@ -1233,13 +1233,13 @@ export function App() {
       try {
         await runSlashCommand(line);
       } catch (e) {
-        postSystem(`命令执行失败�?{e instanceof Error ? e.message : String(e)}`);
+        postSystem(`命令执行失败：${e instanceof Error ? e.message : String(e)}`);
       }
     })();
   }
 
   async function newChat() {
-    // Instant UI switch �?don't wait for stop / session list before clearing.
+    // Instant UI switch — don't wait for stop / session list before clearing.
     const wasBusy = busy;
     clearQueued();
     setAttachments([]);
@@ -1279,7 +1279,7 @@ export function App() {
     {
       const rawTitle = (detailSession.title || "").trim();
       const titleLabel =
-        !rawTitle || rawTitle === "新会�? || rawTitle === "New chat" || rawTitle === "Untitled"
+        !rawTitle || rawTitle === "新会话" || rawTitle === "New chat" || rawTitle === "Untitled"
           ? t("sessionUntitled")
           : rawTitle;
       setToast(t("historyOpened", titleLabel));
@@ -1324,7 +1324,7 @@ export function App() {
       setSessionsTotal(res.total || 0);
       setSessionsTotalPages(res.total_pages || 1);
     }
-    setToast("已删除对�?);
+    setToast("已删除对话。");
   }
 
   async function copyBubble(id: string, text: string) {
@@ -1336,7 +1336,7 @@ export function App() {
     try {
       await navigator.clipboard.writeText(body);
       setCopiedId(id);
-      setToast("已复�?);
+      setToast("已复制。");
       window.setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1600);
     } catch {
       setToast("复制失败");
@@ -1486,9 +1486,9 @@ export function App() {
     }
 
     stoppingRef.current = true;
-    setToast("正在停止�?);
+    setToast("正在停止…");
     const sid = sessionId;
-    // Server cancel also rejects pending approvals �?do not double-call decide here
+    // Server cancel also rejects pending approvals — do not double-call decide here
     if (sid) {
       try {
         await stopSession(sid);
@@ -1681,14 +1681,14 @@ export function App() {
   function buildMessageWithAttachments(userText: string) {
     if (attachments.length === 0) return userText;
     const blocks = attachments.map((a) => {
-      const head = `### 附件�?{a.name}\n路径：\`${a.path}\``;
+      const head = `### 附件：${a.name}\n路径：\`${a.path}\``;
       if (a.text?.trim()) {
         return `${head}\n\`\`\`\n${a.text.trim()}\n\`\`\``;
       }
       return `${head}\n${t("attachBinary")}`;
     });
     const attachBlock = [
-      "用户上传了以下附件，请根据附件内容进行分析与回答�?,
+      "用户上传了以下附件，请根据附件内容进行分析与回答。",
       "",
       ...blocks,
     ].join("\n");
@@ -1753,8 +1753,8 @@ export function App() {
       return;
     }
 
-    if ((raw.startsWith("/") || raw.startsWith("�?)) && !hasAttach) {
-      const line = raw.replace(/^�?, "/");
+    if ((raw.startsWith("/") || raw.startsWith("／")) && !hasAttach) {
+      const line = raw.replace(/^／/, "/");
       const parsed = parseSlashLine(line);
       setInput("");
       if (parsed?.name !== "skill") {
@@ -1763,7 +1763,7 @@ export function App() {
       try {
         await runSlashCommand(line);
       } catch (e) {
-        postSystem(`命令执行失败�?{e instanceof Error ? e.message : String(e)}`);
+        postSystem(`命令执行失败：${e instanceof Error ? e.message : String(e)}`);
       }
       return;
     }
@@ -1872,7 +1872,7 @@ export function App() {
               const awaiting =
                 Boolean(ev.data.awaiting_confirm) || ev.data.mode === "plan";
               if (awaiting) {
-                // Plan mode: only the confirm dialog �?never the preview card
+                // Plan mode: only the confirm dialog — never the preview card
                 const planSid = String(
                   ev.data.session_id || sessionIdRef.current || sessionId || "",
                 );
@@ -1983,7 +1983,7 @@ export function App() {
               setActivePlan(null);
             }
 
-            // Subagent events share the bus �?accumulate into subagent transcript
+            // Subagent events share the bus — accumulate into subagent transcript
             if (ev.parent_id) {
               const childId = String(ev.agent_id || "");
               if (!childId) {
@@ -2014,7 +2014,7 @@ export function App() {
                       streaming: true,
                     });
                   }
-                  return { ...s, transcript: tr, activity: "生成中�? };
+                  return { ...s, transcript: tr, activity: "生成中…" };
                 });
               } else if (type === "assistant_reasoning_delta") {
                 const chunk = String(ev.data.chunk ?? "");
@@ -2163,7 +2163,7 @@ export function App() {
             if (type === "compress_start" || type === "compress_progress") {
               setCompressState({
                 active: true,
-                message: String(ev.data.message || "正在快速压缩上下文�?),
+                message: String(ev.data.message || "正在快速压缩上下文…"),
                 attempt: Number(ev.data.attempt || 0),
                 maxAttempts: Number(ev.data.max_attempts || 3),
                 before: Number(ev.data.before || ev.data.tokens || 0),
@@ -2179,7 +2179,7 @@ export function App() {
               const before = Number(ev.data.before || 0);
               setCompressState({
                 active: true,
-                message: String(ev.data.message || `上下文已重置 ${before}�?{after}`),
+                message: String(ev.data.message || `上下文已重置 ${before}→${after}`),
                 attempt: Number((ev.data.meta as { attempts?: number } | undefined)?.attempts || 0),
                 maxAttempts: Number(ev.data.max_attempts || 3),
                 before,
@@ -2258,7 +2258,7 @@ export function App() {
               const question = String(ev.data.question || "");
               const allowCustom = ev.data.allow_custom !== false;
               const customLabel = String(
-                ev.data.custom_label || (locale === "en" ? "Other (type your answer)" : "其他（请补充�?),
+                ev.data.custom_label || (locale === "en" ? "Other (type your answer)" : "其他（请补充）"),
               );
               stripDuplicateAskBubble(question);
               const askSid = String(
@@ -2304,7 +2304,7 @@ export function App() {
                 goal: String(ev.data.goal || ""),
                 status: "running",
                 role: String(ev.data.role || "leaf"),
-                activity: "启动中�?,
+                activity: "启动中…",
                 transcript: [],
               };
               setSubs((prev) => [...prev, node]);
@@ -2325,7 +2325,7 @@ export function App() {
               patchSubagent(childId, (s) => ({
                 ...s,
                 status: ok ? "done" : "error",
-                summary: cancelled ? summary || "（已停止�? : summary,
+                summary: cancelled ? summary || "（已停止）" : summary,
                 activity: undefined,
                 transcript: sealSubassistant(s.transcript || []),
               }));
@@ -2356,7 +2356,7 @@ export function App() {
           },
           onError: (err) => {
             sealStreamBubble();
-            appendMsg({ id: uid(), role: "assistant", content: `错误�?{err}` });
+            appendMsg({ id: uid(), role: "assistant", content: `错误：${err}` });
             turnDoneRef.current = true;
           },
           onAbort: () => {
@@ -2374,7 +2374,7 @@ export function App() {
         appendMsg({
           id: uid(),
           role: "assistant",
-          content: `请求失败�?{e instanceof Error ? e.message : String(e)}`,
+          content: `请求失败：${e instanceof Error ? e.message : String(e)}`,
         });
       }
     } finally {
@@ -2437,7 +2437,7 @@ export function App() {
         await writeFileContent(detail.path, detail.content);
         setDetail({ ...detail, dirty: false });
         setFsRefresh((n) => n + 1);
-        setToast(`已保�?${detail.path}`);
+        setToast(`已保存 ${detail.path}`);
       },
     });
   }
@@ -2446,7 +2446,7 @@ export function App() {
     if (!approval || !sessionId) return;
     const id = approval.approvalId;
     const toolName = approval.name;
-    // Optimistic dismiss �?prevents double-submit / stuck panel
+    // Optimistic dismiss — prevents double-submit / stuck panel
     setApproval(null);
     try {
       await decideApproval(sessionId, id, approved, remember);
@@ -2468,12 +2468,12 @@ export function App() {
     const prompt = askPrompt;
     const sid = prompt?.sessionId || sessionIdRef.current || sessionId;
     if (!prompt || !sid || askSubmitting) {
-      if (prompt && !sid) setToast("会话未就绪，请稍后重�?);
+      if (prompt && !sid) setToast("会话未就绪，请稍后重试。");
       return;
     }
     const id = prompt.askId;
     if (!id) {
-      setToast("询问已失效，请重新发送消�?);
+      setToast("询问已失效，请重新发送消息。");
       return;
     }
     const opt = prompt.options.find((o) => o.key === choice);
@@ -2505,11 +2505,11 @@ export function App() {
     const prompt = planConfirm;
     const sid = prompt?.sessionId || sessionIdRef.current || sessionId;
     if (!prompt || !sid || planConfirmSubmitting) {
-      if (prompt && !sid) setToast("会话未就绪，请稍后重�?);
+      if (prompt && !sid) setToast("会话未就绪，请稍后重试。");
       return;
     }
     if (!prompt.planId) {
-      setToast("方案已失效，请重新发送消�?);
+      setToast("方案已失效，请重新发送消息。");
       return;
     }
     const nextSummary = (draft?.summary ?? prompt.summary).trim() || prompt.summary;
@@ -2519,7 +2519,7 @@ export function App() {
     }));
     setPlanConfirmSubmitting(true);
     setPlanConfirm(null);
-    // Seed the progress panel BEFORE awaiting the API �?otherwise late SSE
+    // Seed the progress panel BEFORE awaiting the API — otherwise late SSE
     // plan_step events can arrive during the request and then get wiped by a
     // post-await setActivePlan({…pending}).
     if (approved) {
@@ -2625,7 +2625,7 @@ export function App() {
               title="取消"
               onClick={() => setPendingConfirm(null)}
             >
-              �?            </button>
+              ✕            </button>
             <button
               type="button"
               className="fe-inline-btn ok"
@@ -2638,7 +2638,7 @@ export function App() {
                 );
               }}
             >
-              �?            </button>
+              ✕            </button>
           </div>
         </div>
       )}
@@ -2816,8 +2816,8 @@ export function App() {
               </div>
               <div className="compress-meta">
                 {compressState.after != null
-                  ? `${compressState.before} �?${compressState.after}`
-                  : `�?${compressState.attempt || 1}/${compressState.maxAttempts} 轮`}
+                  ? `${compressState.before} → ${compressState.after}`
+                  : `第 ${compressState.attempt || 1}/${compressState.maxAttempts} 轮`}
               </div>
             </div>
           )}
@@ -2867,7 +2867,7 @@ export function App() {
                           <IconCheck size={14} />
                         </span>
                       ) : (
-                        <span className="file-ref-status">�?/span>
+                        <span className="file-ref-status">…</span>
                       )}
                     </button>
                   );
@@ -2889,12 +2889,12 @@ export function App() {
                       {tool.status === "pending"
                         ? "?"
                         : tool.status === "streaming"
-                          ? "�?
+                          ? "…"
                           : tool.status === "running"
-                            ? "�?
+                            ? "…"
                             : tool.status === "error"
                               ? "!"
-                              : "�?}
+                              : "…"}
                     </span>
                     <span className="tool-chip-body">
                       <span className="tool-chip-name">{tool.name || "tool"}</span>
@@ -2904,7 +2904,7 @@ export function App() {
                       <span className="tool-chip-hint">等待确认</span>
                     )}
                     {tool.status === "streaming" && (
-                      <span className="tool-chip-hint">生成�?/span>
+                      <span className="tool-chip-hint">生成中</span>
                     )}
                   </button>
                 );
@@ -3058,7 +3058,7 @@ export function App() {
                     m.content ? (
                       <MarkdownView content={m.content} streaming={m.streaming && !m.reasoningStreaming} />
                     ) : m.streaming && !m.reasoningStreaming ? (
-                      <div className="plain muted">�?/div>
+                      <div className="plain muted">…</div>
                     ) : null
                   ) : (
                     <div className="user-bubble-body">
@@ -3127,10 +3127,10 @@ export function App() {
                     <span className="message-queue-text">
                       {q.userDisplay ||
                         (q.attachments?.length
-                          ? q.attachments.map((a) => a.name).join(locale === "en" ? ", " : "�?)
+                          ? q.attachments.map((a) => a.name).join(locale === "en" ? ", " : "、")
                           : q.text)}
                       {q.attachments && q.attachments.length > 0
-                        ? ` · ${q.attachments.length}${locale === "en" ? " files" : " 个附�?}`
+                        ? ` · ${q.attachments.length}${locale === "en" ? " files" : " 个附件"}`
                         : ""}
                     </span>
                     <button
@@ -3139,7 +3139,7 @@ export function App() {
                       title={t("queueRemove")}
                       onClick={() => removeQueued(q.id)}
                     >
-                      �?                    </button>
+                      ✕                    </button>
                   </li>
                 ))}
               </ul>
@@ -3192,7 +3192,7 @@ export function App() {
                     title={t("approvalDismiss")}
                     onClick={() => void resolveApproval(false)}
                   >
-                    �?                  </button>
+                    ✕                  </button>
                 </div>
                 <p className="inline-approval-summary">{approval.summary}</p>
               </div>
@@ -3299,7 +3299,7 @@ export function App() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onCompositionEnd={(e) => {
-                  // IME 确认后再次同步，避免中文输入法吞�?/
+                  // IME 确认后再次同步，避免中文输入法吞字。/
                   setInput(e.currentTarget.value);
                 }}
                 placeholder={busy ? t("composerBusy") : t("composerPlaceholder")}
@@ -3307,7 +3307,7 @@ export function App() {
                 onKeyDown={(e) => {
                   // Force-open slash menu when user types /
                   if (
-                    (e.key === "/" || e.key === "�?) &&
+                    (e.key === "/" || e.key === "／") &&
                     !e.ctrlKey &&
                     !e.metaKey &&
                     !e.altKey &&
@@ -3492,7 +3492,7 @@ export function App() {
               </div>
             </div>
             </div>
-            <div className="status-bar" aria-label="会话状�?>
+            <div className="status-bar" aria-label="会话状态">
               <div
                 className={`ctx-meter ${ctxWarn ? "warn" : ""}`}
                 title={`${t("context")} ${ctx.tokens} / ${ctx.limit} tokens`}
@@ -3692,10 +3692,10 @@ export function App() {
                           {tool.status === "pending"
                             ? "?"
                             : tool.status === "streaming" || tool.status === "running"
-                              ? "�?
+                              ? "…"
                               : tool.status === "error"
                                 ? "!"
-                                : "�?}
+                                : "…"}
                         </span>
                         <span className="tool-chip-body">
                           <span className="tool-chip-name">{tool.name}</span>
@@ -3739,19 +3739,19 @@ export function App() {
                 {detail.kind === "document" && (
                   <div className="office-preview">
                     <p className="hint">
-                      {detail.message || "文本预览（非完整排版�?}。需要原文件请点「打开/下载」�?                    </p>
+                      {detail.message || "文本预览（非完整排版）"}。需要原文件请点「打开/下载」。                    </p>
                     <pre className="code-fence office-text">
-                      {detail.preview || "（无文字内容�?}
+                      {detail.preview || "（无文字内容）"}
                     </pre>
                   </div>
                 )}
                 {detail.kind === "unsupported" && (
                   <div className="unsupported-preview">
                     <p className="hint unsupported-msg">
-                      {detail.message || "暂不支持预览此文�?}
+                      {detail.message || "暂不支持预览此文件"}
                     </p>
                     {detail.rawUrl && (
-                      <p className="hint">可使用「打开/下载」在系统中查看原文件�?/p>
+                      <p className="hint">可使用「打开/下载」在系统中查看原文件。</p>
                     )}
                   </div>
                 )}
