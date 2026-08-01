@@ -43,7 +43,7 @@ Runs locally. Bring your own API key. History, Memory, and workspace stay on dis
 | **Chat + tools** | SSE streaming, attachments, stop cleanly, edit & resend (optionally restore files to that step) |
 | **Files** | Create / rename / delete (confirm) / drag-move; search by name **and** content with line jump |
 | **Memory** | Append, remove, or rewrite `MEMORY.md` (approval required) |
-| **Skills** | Drop packs under `skills/`, invoke with `/skill <name>` |
+| **Skills** | Drop packs under `src/skills/`, invoke with `/skill <name>` |
 | **Models** | Separate main, sub-agent, and compress models |
 | **UI** | Chinese / English · light / dark · paginated history |
 
@@ -76,7 +76,7 @@ python3 main.py
 ```
 
 Open **http://127.0.0.1:8787** → pick a workspace folder → Settings → Model → API key  
-(or copy `data/model.json.example` → `data/model.json`).
+(or copy `src/data/model.json.example` → `src/data/model.json`).
 
 > Never commit real keys, `.env`, or chat history (see `.gitignore`).
 
@@ -106,8 +106,8 @@ flowchart TB
   end
   subgraph Disk["Local disk"]
     WS["Workspace"]
-    Skills["skills/"]
-    Memory["memory/"]
+    Skills["src/skills/"]
+    Memory["src/memory/"]
     Model["Model config"]
   end
   UI --> API
@@ -123,12 +123,12 @@ flowchart TB
 ```
 Sidekick/
 ├── src/metateam/     # core: API, agents, tools
+├── src/skills/       # drop-in Skills
+├── src/memory/       # MEMORY.md
+├── src/data/         # model.json.example (no secrets)
+├── src/sessions/     # sessions (local, not committed)
+├── src/workspace/    # default workspace placeholder
 ├── ui/               # Vite control UI
-├── skills/           # drop-in Skills
-├── memory/           # MEMORY.md
-├── data/             # model.json.example (no secrets)
-├── sessions/         # sessions (local, not committed)
-├── workspace/        # default workspace placeholder
 ├── docs/screenshots/
 ├── main.py
 ├── requirements.txt

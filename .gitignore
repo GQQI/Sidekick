@@ -1,20 +1,20 @@
 # Secrets & local env
 .env
-data/model.json
-data/workspace.json
+src/data/model.json
+src/data/workspace.json
 
 # Runtime data (do not commit)
-sessions/*
-!sessions/.gitkeep
-data/fs_undo/
-memory/**
-!memory/MEMORY.md
-workspace/**
-!workspace/.gitkeep
+src/sessions/*
+!src/sessions/.gitkeep
+src/data/fs_undo/
+src/memory/**
+!src/memory/MEMORY.md
+src/workspace/**
+!src/workspace/.gitkeep
 
 # User-installed skills (keep only the placeholder)
-skills/**
-!skills/.gitkeep
+src/skills/**
+!src/skills/.gitkeep
 
 # Python
 __pycache__/

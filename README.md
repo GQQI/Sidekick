@@ -43,7 +43,7 @@
 | **对话 + 工具** | SSE 流式、附件、干净停止、编辑重发（可选恢复文件到该步） |
 | **文件** | 新建 / 重命名 / 删除确认 / 拖拽移动；按文件名**与**内容搜索并跳行 |
 | **Memory** | 追加、删除或覆写 `MEMORY.md`（需确认） |
-| **Skills** | 放到 `skills/`，`/skill <名称>` 调用 |
+| **Skills** | 放到 `src/skills/`，`/skill <名称>` 调用 |
 | **模型** | 主模型 / 子模型 / 压缩模型可分开配置 |
 | **界面** | 中 / 英 · 浅 / 暗色 · 历史分页 |
 
@@ -76,7 +76,7 @@ python3 main.py
 ```
 
 打开 **http://127.0.0.1:8787** → 选工作区文件夹 → 设置 → 模型 → API Key  
-（或复制 `data/model.json.example` → `data/model.json`）
+（或复制 `src/data/model.json.example` → `src/data/model.json`）
 
 > 切勿提交真实 Key、`.env` 或对话历史（见 `.gitignore`）。
 
@@ -106,8 +106,8 @@ flowchart TB
   end
   subgraph Disk["本机"]
     WS["工作区"]
-    Skills["skills/"]
-    Memory["memory/"]
+    Skills["src/skills/"]
+    Memory["src/memory/"]
     Model["模型配置"]
   end
   UI --> API
@@ -123,12 +123,12 @@ flowchart TB
 ```
 Sidekick/
 ├── src/metateam/     # 核心：API、智能体、工具
+├── src/skills/       # 可丢入的 Skills
+├── src/memory/       # MEMORY.md
+├── src/data/         # model.json.example（无密钥）
+├── src/sessions/     # 会话（本地，不提交）
+├── src/workspace/    # 默认工作区占位
 ├── ui/               # Vite 控制界面
-├── skills/           # 可丢入的 Skills
-├── memory/           # MEMORY.md
-├── data/             # model.json.example（无密钥）
-├── sessions/         # 会话（本地，不提交）
-├── workspace/        # 默认工作区占位
 ├── docs/screenshots/
 ├── main.py
 ├── requirements.txt

@@ -13,9 +13,9 @@ from dotenv import load_dotenv
 # parents[0]=core, [1]=metateam, [2]=src, [3]=repo
 SRC_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[3]
-# Runtime data (data/skills/memory/sessions/workspace) lives at repo root — OpenClaw-style.
-ROOT = REPO_ROOT
-BACKEND_ROOT = REPO_ROOT  # back-compat alias
+# Runtime data lives under src/ (data/skills/memory/sessions/workspace)
+ROOT = SRC_ROOT
+BACKEND_ROOT = SRC_ROOT  # back-compat alias
 
 load_dotenv(REPO_ROOT / ".env")
 
