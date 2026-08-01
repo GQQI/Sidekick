@@ -39,7 +39,7 @@ export function ModelSwitcher({
     ? "Demo"
     : modelLabel(setup, currentRef) || t("modelSwitch");
 
-  const options = setup ? allModelOptions(setup, { requireKey: true }) : [];
+  const options = allModelOptions(setup, { requireKey: true });
   const ready = options.filter((o) => !o.disabled);
   const pending = options.filter((o) => o.disabled);
   const groupedReady = ready.reduce<Record<string, typeof ready>>((acc, o) => {

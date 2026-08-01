@@ -1,4 +1,5 @@
 import type { ModelSetup } from "../types/modelSetup";
+import { normalizeModelSetup } from "../types/modelSetup";
 
 export type Health = {
   ok: boolean;
@@ -140,24 +141,36 @@ export const saveMemory = (content: string) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
-export const fetchModel = () => json<ModelSetup>("/api/model");
-export const saveModel = (patch: Partial<ModelSetup>) =>
-  json<{ status: string; config: ModelSetup; note: string }>("/api/model", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
+export const fetchModel = async () =>
+  normalizeModelSetup(await json<unknown>("/api/model"));
 
-export const selectModel = (
+export const saveModel = async (patch: Partial<ModelSetup>) => {
+  const res = await json<{ status: string; config: unknown; note: string }>(
+    "/api/model",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  return { ...res, config: normalizeModelSetup(res.config) };
+};
+
+export const selectModel = async (
   role: "main" | "subagent" | "compress",
   providerId: string,
   model: string,
-) =>
-  json<{ status: string; config: ModelSetup; note: string }>("/api/model/select", {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ role, provider_id: providerId, model }),
-  });
+) => {
+  const res = await json<{ status: string; config: unknown; note: string }>(
+    "/api/model/select",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role, provider_id: providerId, model }),
+    },
+  );
+  return { ...res, config: normalizeModelSetup(res.config) };
+};
 
 export const fetchWorkspaces = () =>
   json<{
