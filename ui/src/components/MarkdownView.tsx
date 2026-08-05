@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import mermaid from "mermaid";
 import "highlight.js/styles/github.css";
+import { splitTextWithUrls } from "../browser/urlDetect";
 
 mermaid.initialize({
   startOnLoad: false,
@@ -15,6 +16,8 @@ mermaid.initialize({
 type Props = {
   content: string;
   streaming?: boolean;
+  /** Ctrl/Cmd+click an http(s) link → ask to open in browser sandbox. */
+  onCtrlClickUrl?: (url: string, clientX: number, clientY: number) => void;
 };
 
 function nodeText(node: ReactNode): string {
@@ -77,15 +80,53 @@ function CodeBlock({
   className,
   children,
   streaming,
+  onCtrlClickUrl,
 }: {
   className?: string;
   children?: ReactNode;
   streaming?: boolean;
+  onCtrlClickUrl?: (url: string, clientX: number, clientY: number) => void;
 }) {
   const text = nodeText(children).replace(/\n$/, "");
   const lang = /language-([\w-]+)/.exec(className || "")?.[1] || "";
   if (lang === "mermaid") {
     return <MermaidBlock chart={text} streaming={streaming} />;
+  }
+  // Shell / plain logs: make bare URLs Ctrl+clickable for sandbox open.
+  if (onCtrlClickUrl && (!lang || lang === "text" || lang === "shell" || lang === "bash" || lang === "powershell" || lang === "console")) {
+    const parts = splitTextWithUrls(text);
+    const hasUrl = parts.some((p) => p.type === "url");
+    if (hasUrl) {
+      return (
+        <pre className={`code-fence ${className || ""}`.trim()}>
+          <code className={className}>
+            {parts.map((p, i) =>
+              p.type === "text" ? (
+                <span key={i}>{p.value}</span>
+              ) : (
+                <a
+                  key={i}
+                  href={p.value}
+                  className="sandbox-hot-link"
+                  title="Ctrl+单击可在浏览器沙盒打开"
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => {
+                    if (e.ctrlKey || e.metaKey) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onCtrlClickUrl(p.value, e.clientX, e.clientY);
+                    }
+                  }}
+                >
+                  {p.value}
+                </a>
+              ),
+            )}
+          </code>
+        </pre>
+      );
+    }
   }
   return (
     <pre className={`code-fence ${className || ""}`.trim()}>
@@ -94,7 +135,7 @@ function CodeBlock({
   );
 }
 
-export function MarkdownView({ content, streaming }: Props) {
+export function MarkdownView({ content, streaming, onCtrlClickUrl }: Props) {
   const body = content || (streaming ? "…" : "");
 
   const components = useMemo(
@@ -120,14 +161,31 @@ export function MarkdownView({ content, streaming }: Props) {
           );
         }
         return (
-          <CodeBlock className={className} streaming={streaming}>
+          <CodeBlock
+            className={className}
+            streaming={streaming}
+            onCtrlClickUrl={onCtrlClickUrl}
+          >
             {children}
           </CodeBlock>
         );
       },
       a({ href, children }: { href?: string; children?: ReactNode }) {
         return (
-          <a href={href} target="_blank" rel="noreferrer">
+          <a
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="sandbox-hot-link"
+            title="Ctrl+单击可在浏览器沙盒打开"
+            onClick={(e) => {
+              if (!href || !(e.ctrlKey || e.metaKey)) return;
+              if (!/^https?:\/\//i.test(href)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              onCtrlClickUrl?.(href, e.clientX, e.clientY);
+            }}
+          >
             {children}
           </a>
         );
@@ -140,7 +198,7 @@ export function MarkdownView({ content, streaming }: Props) {
         );
       },
     }),
-    [streaming],
+    [streaming, onCtrlClickUrl],
   );
 
   return (

@@ -43,6 +43,74 @@ def _is_long_running_command(command: str) -> bool:
     return bool(_LONG_RUNNING_RE.search(command))
 
 
+_INTERACTIVE_SCAFFOLD_RE = re.compile(
+    r"("
+    r"npm\s+create\s+vue|"
+    r"npm\s+init\s+vue|"
+    r"yarn\s+create\s+vue|"
+    r"pnpm\s+create\s+vue|"
+    r"npm\s+create\s+vite|"
+    r"yarn\s+create\s+vite|"
+    r"pnpm\s+create\s+vite|"
+    r"create-react-app\b|"
+    r"npx\s+create-react-app\b|"
+    r"ng\s+new\b|"
+    r"vue\s+create\b|"
+    r"npx\s+@vue/cli\b|"
+    r"npm\s+create\s+next-app|"
+    r"npx\s+create-next-app|"
+    r"npm\s+create\s+svelte|"
+    r"npm\s+create\s+astro"
+    r")",
+    re.I,
+)
+
+
+def _looks_interactive_scaffold(command: str) -> bool:
+    return bool(_INTERACTIVE_SCAFFOLD_RE.search(command))
+
+
+def _has_noninteractive_flags(command: str) -> bool:
+    low = command.lower()
+    # create-vue / create-vite / create-next-app style flags after `--`
+    markers = (
+        "--default",
+        "--template",
+        "--typescript",
+        "--ts",
+        "--javascript",
+        "--js",
+        "--router",
+        "--pinia",
+        "--with-tests",
+        "--eslint",
+        "--yes",
+        " -y",
+        "--ci",
+        "--use-npm",
+        "--use-pnpm",
+        "--use-yarn",
+        "--tailwind",
+        "--app",
+        "--src-dir",
+    )
+    if any(m in low for m in markers):
+        return True
+    # `npm create vite@latest app -- --template vue` has `--` separator
+    if re.search(r"\s--\s+--", command):
+        return True
+    return False
+
+
+def _subprocess_text_kwargs() -> dict[str, Any]:
+    """Always decode child output as UTF-8 with replacement — never locale GBK."""
+    return {
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+
+
 _DANGEROUS_SHELL_RE = re.compile(
     r"("
     r"rm\s+-rf\s+/|"
@@ -62,10 +130,32 @@ _DANGEROUS_SHELL_RE = re.compile(
 )
 
 
+def _shell_host_label() -> str:
+    """Short OS + shell dialect for prompts / tool descriptions."""
+    if os.name == "nt":
+        return "Windows / PowerShell"
+    return "Unix / bash"
+
+
 def _shell_argv(command: str) -> list[str]:
     """Run via explicit shell binary — avoids Python shell=True string risks."""
     if os.name == "nt":
-        return ["cmd.exe", "/d", "/c", command]
+        # PowerShell so mkdir/curl aliases and modern Windows tooling work as expected.
+        # Force UTF-8 console output so child stdout isn't OEM/GBK (avoids decode crashes).
+        ps = (
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "$OutputEncoding = [Console]::OutputEncoding; "
+            f"{command}"
+        )
+        return [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            ps,
+        ]
     return ["/bin/bash", "-lc", command]
 
 
@@ -100,9 +190,7 @@ def _run_shell_background(command: str, *, cwd: str, collect_secs: float = 8.0, 
         "cwd": cwd,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
+        **_subprocess_text_kwargs(),
         "env": env or {**os.environ, "PYTHONIOENCODING": "utf-8"},
     }
     if os.name == "nt":
@@ -270,6 +358,43 @@ def _looks_like_code_path(path: str) -> bool:
     return suffix in CODE_SUFFIXES
 
 
+# Content / config deliverables — creating these should not require a prior
+# codebase_find_similar (align is for reusable code modules, not decks/docs).
+_ALIGN_EXEMPT_SUFFIXES = {
+    ".html",
+    ".htm",
+    ".md",
+    ".txt",
+    ".css",
+    ".scss",
+    ".less",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".svg",
+}
+
+
+def _needs_codebase_align(path: str, workspace: Path) -> bool:
+    """True when creating this new file should require a prior similarity align."""
+    suffix = Path(path).suffix.lower()
+    if not suffix or suffix in _ALIGN_EXEMPT_SUFFIXES:
+        return False
+    if not _looks_like_code_path(path):
+        return False
+    # Greenfield workspace: nothing to reuse yet.
+    try:
+        from ..services import codebase_memory as cbm
+
+        idx = cbm.get_or_build_index(workspace)
+        if idx.file_count() == 0:
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def build_registry(
     settings: Settings,
     *,
@@ -283,17 +408,22 @@ def build_registry(
     # Codebase-as-Memory: new code files require a prior similarity align in this run.
     align_state: dict[str, Any] = {"aligned": False, "queries": []}
 
-    def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
+    def read_file(path: str, offset: int = 1, limit: int = 0) -> str:
+        """Read a text file. limit<=0 means read through end of file (no hard cap)."""
         fp = _safe_path(ws, path)
         if not fp.exists():
             return f"ERROR: not found: {fp}"
         lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
         offset = max(1, int(offset))
-        limit = max(1, min(int(limit), 2000))
-        chunk = lines[offset - 1 : offset - 1 + limit]
+        total = len(lines)
+        req_limit = int(limit)
+        # Default / non-positive limit → remainder of file (no artificial ceiling).
+        if req_limit <= 0:
+            req_limit = max(0, total - (offset - 1))
+        chunk = lines[offset - 1 : offset - 1 + req_limit]
         body = "\n".join(f"{i}|{line}" for i, line in enumerate(chunk, start=offset))
-        if offset - 1 + limit < len(lines):
-            body += f"\n… next_offset={offset + limit} total_lines={len(lines)}"
+        if offset - 1 + req_limit < total:
+            body += f"\n… next_offset={offset + req_limit} total_lines={total}"
         return body
 
     def write_file(path: str, content: str, force_create: bool = False) -> str:
@@ -313,7 +443,7 @@ def build_registry(
             is_new = not target.exists()
             if (
                 is_new
-                and _looks_like_code_path(rel)
+                and _needs_codebase_align(rel, ws)
                 and not bool(force_create)
                 and not align_state["aligned"]
             ):
@@ -448,9 +578,7 @@ def build_registry(
                 _shell_argv(cmd),
                 cwd=str(ws.resolve()),
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                **_subprocess_text_kwargs(),
                 timeout=timeout,
                 shell=False,
                 env=_sandboxed_env(settings),
@@ -504,7 +632,11 @@ def build_registry(
                         return "\n".join(hits)
         return "\n".join(hits) if hits else "no matches"
 
-    def run_shell(command: str, background: bool = False) -> str:
+    def run_shell(
+        command: str,
+        background: bool = False,
+        stdin_text: str = "",
+    ) -> str:
         if not settings.allow_shell:
             return "ERROR: shell disabled (set META_ALLOW_SHELL=1 to enable)"
         low = command.lower().strip()
@@ -514,6 +646,20 @@ def build_registry(
         if blocked:
             return blocked
 
+        # Interactive scaffolding CLIs hang with no TTY — steer to non-interactive.
+        if _looks_interactive_scaffold(low) and not _has_noninteractive_flags(low):
+            return (
+                "ERROR: this command looks like an interactive scaffold CLI "
+                "(create-vue / create-react-app / angular / etc.). "
+                "Sidekick has no TTY for arrow-key menus.\n"
+                "Use non-interactive flags instead, for example:\n"
+                "  npm create vue@latest my-app -- --default\n"
+                "  npm create vue@latest my-app -- --typescript --router --pinia --eslint-with-prettier\n"
+                "  npm create vite@latest my-app -- --template vue\n"
+                "Or call ask_user to pick options, then re-run with those flags. "
+                "Optional: pass stdin_text with newline-separated answers for simple prompts."
+            )
+
         env = _sandboxed_env(settings)
         # Dev servers / watchers never exit — must not block the agent.
         long_running = background or _is_long_running_command(low)
@@ -522,23 +668,36 @@ def build_registry(
                 command, cwd=str(ws.resolve()), collect_secs=8.0, env=env
             )
 
+        input_data = stdin_text if stdin_text else None
         try:
             proc = subprocess.run(
                 _shell_argv(command),
                 cwd=str(ws.resolve()),
                 capture_output=True,
-                text=True,
+                input=input_data,
+                **_subprocess_text_kwargs(),
                 timeout=settings.shell_timeout,
                 env=env,
             )
         except subprocess.TimeoutExpired as exc:
             partial = (exc.stdout or "") + (("\n" + (exc.stderr or "")) if exc.stderr else "")
             partial = partial[-8000:]
+            hint = ""
+            if _looks_interactive_scaffold(low) or "select" in partial.lower() or "?" in partial:
+                hint = (
+                    "\nHint: if the CLI is waiting for interactive choices, stop and re-run "
+                    "with non-interactive flags (e.g. `npm create vue@latest app -- --default`) "
+                    "or ask_user then pass flags / stdin_text."
+                )
             return (
                 f"ERROR: timeout after {settings.shell_timeout}s — command still running or hung.\n"
                 f"For servers (npm run dev / vite / uvicorn), call run_shell with background=true.\n"
                 f"partial_output:\n{partial or '(none)'}"
+                f"{hint}"
             )
+        except UnicodeDecodeError as exc:
+            # Should be unreachable with errors=replace; keep a clear fallback.
+            return f"ERROR: shell output decode failed ({exc}); retry with ASCII-only commands"
         out = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
         if len(out) > 14_000:
             out = out[:14_000] + "\n…[truncated]"
@@ -572,13 +731,18 @@ def build_registry(
     reg.register(
         Tool(
             "read_file",
-            "Read a text file with line numbers. Use offset/limit for large files.",
+            "Read a text file with line numbers. By default reads the whole file from offset "
+            "(limit=0). Pass a positive limit only when you intentionally want a slice.",
             {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "default": 1},
-                    "limit": {"type": "integer", "default": 200},
+                    "limit": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Lines to read; 0 or omit = through end of file.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -590,8 +754,10 @@ def build_registry(
         Tool(
             "write_file",
             "Write/overwrite a text file under the workspace. Requires user approval. "
-            "Creating a NEW code file requires a prior codebase_find_similar call in this run "
-            "(or force_create=true after confirming nothing reusable exists).",
+            "Creating a NEW reusable code module (e.g. .py/.ts/.js) requires a prior "
+            "codebase_find_similar call in this run (or force_create=true). "
+            "Standalone content files (.html/.md/.css/.json, etc.) and greenfield "
+            "workspaces do not need align first.",
             {
                 "type": "object",
                 "properties": {
@@ -790,7 +956,8 @@ def build_registry(
             "verify_run",
             "Run a one-shot verification command (tests/lint). Requires approval and META_ALLOW_SHELL=1. "
             "Prefer this over open-ended shell for acceptance checks. "
-            "If shape_contract.verify_command is set, run that before claiming done.",
+            "If shape_contract.verify_command is set, run that before claiming done. "
+            f"Host shell: {_shell_host_label()} — write the command for that dialect.",
             {
                 "type": "object",
                 "properties": {
@@ -805,13 +972,29 @@ def build_registry(
         )
     )
     if settings.allow_shell:
+        _shell_desc = (
+            "Run a shell command in the workspace. Prefer read_file for reading files. "
+            f"Host shell: {_shell_host_label()}. "
+            "IMPORTANT: long-running servers (npm run dev, vite, uvicorn --reload, etc.) "
+            "are auto-started in background and return early with pid + startup logs — "
+            "do NOT wait for them to exit. Set background=true to force background mode. "
+            "Scaffold CLIs (create-vue / create-vite / create-next-app) have NO TTY — "
+            "always use non-interactive flags, e.g. "
+            "`npm create vue@latest my-app -- --default` or "
+            "`npm create vite@latest my-app -- --template vue`. "
+            "Call ask_user first if the user must pick TypeScript/Router/etc., then encode as flags. "
+            "Optional stdin_text pipes line-based answers (prefer flags)."
+        )
+        if os.name == "nt":
+            _shell_desc += (
+                " On Windows use PowerShell syntax (not bash): mkdir path; "
+                "New-Item -ItemType Directory -Force; curl.exe or Invoke-WebRequest; "
+                "use ';' or separate calls instead of bash '&&' / 'mkdir -p'."
+            )
         reg.register(
             Tool(
                 "run_shell",
-                "Run a shell command in the workspace. Prefer read_file for reading files. "
-                "IMPORTANT: long-running servers (npm run dev, vite, uvicorn --reload, etc.) "
-                "are auto-started in background and return early with pid + startup logs — "
-                "do NOT wait for them to exit. Set background=true to force background mode.",
+                _shell_desc,
                 {
                     "type": "object",
                     "properties": {
@@ -819,6 +1002,13 @@ def build_registry(
                         "background": {
                             "type": "boolean",
                             "description": "If true, start and return without waiting for exit.",
+                        },
+                        "stdin_text": {
+                            "type": "string",
+                            "description": (
+                                "Optional stdin for simple prompts (newline-separated). "
+                                "Prefer non-interactive CLI flags for scaffolds."
+                            ),
                         },
                     },
                     "required": ["command"],
@@ -1053,6 +1243,136 @@ def build_registry(
                 parallel_safe=False,
             )
         )
+
+    # Capability B: agent browser tools on the CDP sandbox session (same host as Select Mode).
+    def browser_navigate(url: str = "") -> str:
+        from ..services.browser_sandbox import SANDBOX
+
+        target = (url or "").strip()
+        if not target:
+            return "ERROR: empty url"
+        try:
+            info = SANDBOX.navigate(target)
+            return json.dumps(info, ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR: {exc}"
+
+    def browser_screenshot(full_page: bool = False, name: str = "") -> str:
+        from ..services.browser_sandbox import SANDBOX
+
+        try:
+            path = SANDBOX.save_screenshot_to_workspace(
+                ws,
+                name=(name or "").strip(),
+                full_page=bool(full_page),
+            )
+            rel = str(path.relative_to(ws.resolve())).replace("\\", "/")
+            return json.dumps({"path": rel, "abs": str(path)}, ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR: {exc}"
+
+    def browser_console(limit: int = 40) -> str:
+        from ..services.browser_sandbox import SANDBOX
+
+        try:
+            logs = SANDBOX.console_logs(limit=int(limit) if limit else 40)
+            return json.dumps({"count": len(logs), "logs": logs}, ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR: {exc}"
+
+    def browser_click(selector: str = "") -> str:
+        from ..services.browser_sandbox import SANDBOX
+
+        try:
+            return SANDBOX.click_selector(selector)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR: {exc}"
+
+    def browser_type(selector: str = "", text: str = "", clear: bool = True) -> str:
+        from ..services.browser_sandbox import SANDBOX
+
+        try:
+            return SANDBOX.type_text(selector, text, clear=bool(clear))
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR: {exc}"
+
+    reg.register(
+        Tool(
+            "browser_navigate",
+            "Open a URL in Sidekick's CDP browser sandbox (Playwright Chromium). "
+            "Prefer http://127.0.0.1 or http://localhost for local apps. "
+            "Starts a headed session if needed. Same session as Select Mode.",
+            {
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+            },
+            browser_navigate,
+            parallel_safe=False,
+            requires_approval=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "browser_screenshot",
+            "Capture the sandbox browser viewport to .sidekick/browser/*.png in the workspace.",
+            {
+                "type": "object",
+                "properties": {
+                    "full_page": {"type": "boolean", "default": False},
+                    "name": {"type": "string", "description": "Optional filename"},
+                },
+                "required": [],
+            },
+            browser_screenshot,
+            parallel_safe=False,
+        )
+    )
+    reg.register(
+        Tool(
+            "browser_console",
+            "Read recent console messages from the sandbox browser session.",
+            {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "default": 40}},
+                "required": [],
+            },
+            browser_console,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "browser_click",
+            "Click an element in the sandbox browser by CSS selector (or Playwright selector).",
+            {
+                "type": "object",
+                "properties": {"selector": {"type": "string"}},
+                "required": ["selector"],
+            },
+            browser_click,
+            parallel_safe=False,
+            requires_approval=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "browser_type",
+            "Type text into an input in the sandbox browser (fill by default).",
+            {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string"},
+                    "text": {"type": "string"},
+                    "clear": {"type": "boolean", "default": True},
+                },
+                "required": ["selector", "text"],
+            },
+            browser_type,
+            parallel_safe=False,
+            requires_approval=True,
+        )
+    )
 
     if getattr(settings, "mcp_enabled", True):
         try:

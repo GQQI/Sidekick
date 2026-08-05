@@ -436,10 +436,22 @@ def _demo_chat(
             break
 
     if messages and messages[-1].get("role") == "tool":
-        content = str(messages[-1].get("content") or "")[:500]
+        content = str(messages[-1].get("content") or "")
+        if "Function skill:" in content or content.lstrip().startswith("# Function skill"):
+            return {
+                "role": "assistant",
+                "content": (
+                    "【Demo】当前是 Demo 模式，不会真正按 Skill 执行写文件/改代码。\n\n"
+                    "Skill 工具只返回了流程说明；请到「设置 → 模型」配置可用的 API Key，"
+                    "确认顶栏不是 Demo，然后新建会话再执行 `/skill`。"
+                ),
+            }
         return {
             "role": "assistant",
-            "content": f"【Demo】工具结果已收到。\n\n{content[:280]}",
+            "content": (
+                "【Demo】工具结果已收到（Demo 模式不会继续真实执行）。\n\n"
+                f"{content[:280]}"
+            ),
         }
 
     tool_names = set()
@@ -452,8 +464,35 @@ def _demo_chat(
 
     # Prefer skill_* function tools
     skill_tools = [n for n in tool_names if n and str(n).startswith("skill_")]
-    if ("skill" in low or "技能" in last_user) and skill_tools:
-        name = "skill_hello_workspace" if "skill_hello_workspace" in skill_tools else skill_tools[0]
+    skill_asked = (
+        "skill" in low
+        or "技能" in last_user
+        or "/skill" in low
+        or "【skill" in low
+        or any(str(n) in last_user for n in skill_tools)
+    )
+    if skill_asked and skill_tools:
+        # Match the requested skill_* name from the user text when possible.
+        name = next((n for n in skill_tools if n and str(n) in last_user), None)
+        if not name:
+            # /skill html-deck-editorial → skill_html_deck_editorial
+            m = re.search(r"/skill\s+([A-Za-z0-9._-]+)", last_user, re.I)
+            if m:
+                want = "skill_" + re.sub(r"[^a-z0-9]+", "_", m.group(1).lower()).strip("_")
+                name = next((n for n in skill_tools if n == want or want in str(n)), None)
+        if not name:
+            name = (
+                "skill_hello_workspace"
+                if "skill_hello_workspace" in skill_tools
+                else skill_tools[0]
+            )
+        # Keep task short — never pass the whole SKILL injection blob as task.
+        task = last_user.strip()
+        if "用户本次附加指令" in task:
+            m = re.search(r"用户本次附加指令：\s*\n(.+?)(?:\n\n请按该 Skill|\Z)", task, re.S)
+            task = (m.group(1).strip() if m else "") or "按该 Skill 的标准流程执行"
+        elif len(task) > 240:
+            task = task[:240]
         return {
             "role": "assistant",
             "content": "",
@@ -463,7 +502,7 @@ def _demo_chat(
                     "type": "function",
                     "function": {
                         "name": name,
-                        "arguments": json.dumps({"task": last_user}, ensure_ascii=False),
+                        "arguments": json.dumps({"task": task}, ensure_ascii=False),
                     },
                 }
             ],

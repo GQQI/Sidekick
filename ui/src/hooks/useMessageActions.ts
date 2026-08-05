@@ -6,7 +6,6 @@ import {
   fetchMemory,
   fetchSession,
   fetchSessions,
-  fetchSkill,
   fetchSkills,
   fetchWorkspaces,
   HISTORY_PAGE_SIZE,
@@ -91,7 +90,7 @@ export type MessageActionsDeps = {
   setSessionsPage: React.Dispatch<React.SetStateAction<number>>;
   setSessionsTotal: React.Dispatch<React.SetStateAction<number>>;
   setSessionsTotalPages: React.Dispatch<React.SetStateAction<number>>;
-  setSidePanel: (p: "files" | "search" | "history") => void;
+  setSidePanel: (p: "files" | "search" | "history" | "browser") => void;
   setExplorerCollapsed: (v: boolean) => void;
   setDetail: React.Dispatch<React.SetStateAction<DetailView>>;
   setLive: React.Dispatch<React.SetStateAction<import("../types/chat").LiveLine[]>>;
@@ -366,45 +365,24 @@ async function runSlashCommand(raw: string): Promise<boolean> {
         return true;
       }
       const { skill: sk, task } = resolved;
-      try {
-        const detail = await fetchSkill(sk.name);
-        const body = (detail.body || "").trim();
-        const prompt = [
-          `### 【Skill 已注入】${detail.name}`,
-          "",
-          `请立即按下列 Skill 执行（对应工具名：\`${detail.tool}\`）。`,
-          `若工具列表中存在 \`${detail.tool}\`，请优先调用它（可带 task 参数）；否则直接严格遵循正文扮演/执行，不要声称「没有这个技能」。`,
-          "",
-          "----- SKILL START -----",
-          "",
-          body.slice(0, 24000),
-          body.length > 24000 ? "\n…(truncated)" : "",
-          "",
-          "----- SKILL END -----",
-          "",
-          task
-            ? `用户本次附加指令：\n${task}\n\n请按该 Skill 的流程，直接针对上述指令执行并给出结果。`
-            : "现在开始：用该 Skill 的视角与流程回应用户接下来的需求。若上文已有用户问题，直接针对它输出。",
-        ].join("\n");
-        if (busyRef.current) {
-          enqueueMessage(prompt);
-          setToast("Skill 已加入队列，当前任务结束后执行。");
-        } else {
-          // Show the injected Skill body in the thread (Markdown), same as history restore.
-          await sendChat(prompt, {
-            showUser: true,
-            userDisplay: task ? `/skill ${sk.name} ${task}` : `/skill ${sk.name}`,
-          });
-        }
-      } catch (e) {
-        postSystem(
-          `加载 Skill 失败：${e instanceof Error ? e.message : String(e)}。也可让模型直接调用 \`${sk.tool}\`。`,
-        );
-        const fallback = task
-          ? `请调用函数工具 ${sk.tool}，task 参数为：${task}`
-          : `请调用函数工具 ${sk.tool} 并严格执行返回的流程。`;
-        if (busyRef.current) enqueueMessage(fallback);
-        else await sendChat(fallback, { showUser: false });
+      // Prefer a short tool-call instruction. The skill_* tool already returns the
+      // SKILL.md body — do NOT paste the whole document into the user message
+      // (that polluted context and Demo mode just echoed the injection text).
+      const prompt = [
+        `请立即调用函数工具 \`${sk.tool}\`${
+          task ? `，task 参数为：${task}` : "（可省略 task，按该 Skill 的标准流程执行）"
+        }。`,
+        "调用后严格按工具返回的流程继续使用 write_file / run_shell 等工具完成任务，",
+        "不要只复述 Skill 正文，也不要声称「没有这个技能」。",
+      ].join("");
+      if (busyRef.current) {
+        enqueueMessage(prompt);
+        setToast("Skill 已加入队列，当前任务结束后执行。");
+      } else {
+        await sendChat(prompt, {
+          showUser: true,
+          userDisplay: task ? `/skill ${sk.name} ${task}` : `/skill ${sk.name}`,
+        });
       }
       return true;
     }
@@ -453,6 +431,11 @@ async function runSlashCommand(raw: string): Promise<boolean> {
       setSidePanel("files");
       setExplorerCollapsed(false);
       setToast("已展开文件浏览器。");
+      return true;
+    case "browser":
+      setSidePanel("browser");
+      setExplorerCollapsed(false);
+      setToast(t("navBrowser"));
       return true;
     case "settings":
       openSettings(args === "model" ? "model" : args === "memory" ? "memory" : "workspace");
@@ -742,14 +725,20 @@ async function addAttachments(files: FileList | null) {
   function buildMessageWithAttachments(userText: string) {
     if (attachments.length === 0) return userText;
     const blocks = attachments.map((a) => {
+      if (a.kind === "dom-element" && a.text?.trim()) {
+        return a.text.trim();
+      }
       const head = `### 附件：${a.name}\n路径：\`${a.path}\``;
       if (a.text?.trim()) {
         return `${head}\n\`\`\`\n${a.text.trim()}\n\`\`\``;
       }
       return `${head}\n${t("attachBinary")}`;
     });
+    const hasDom = attachments.some((a) => a.kind === "dom-element");
     const attachBlock = [
-      "用户上传了以下附件，请根据附件内容进行分析与回答。",
+      hasDom
+        ? "用户附带了页面元素（Select Mode）和/或文件，请按意图修改源码并回答。"
+        : "用户上传了以下附件，请根据附件内容进行分析与回答。",
       "",
       ...blocks,
     ].join("\n");
@@ -784,6 +773,7 @@ async function send(text?: string) {
         "runtime",
         "stats",
         "files",
+        "browser",
         "settings",
         "new",
       ]);

@@ -235,7 +235,9 @@ class Agent:
         # Keep the user-visible stop short — do not paste the whole tool dump again
         # when we already streamed it; prefer a brief seal when body is huge.
         if len(body) > 2500:
-            body = body[:2500].rstrip() + "…"
+            from ..core.textutil import safe_clip
+
+            body = safe_clip(body, 2500)
         content = f"{body}\n\n{note}" if body else note
         self.messages = self.messages[: last_user + 1]
         self.messages.append({"role": "assistant", "content": content})
@@ -594,10 +596,16 @@ class Agent:
 
         self.guard.after(name, args, content)
         if len(content) > self.settings.tool_result_cap:
-            content = content[: self.settings.tool_result_cap] + "\n…[truncated]"
+            from ..core.textutil import safe_clip
+
+            content = safe_clip(
+                content, self.settings.tool_result_cap, ellipsis="\n…[truncated]"
+            )
 
         self._ingest_workspace_fact(name, args, content)
         self._emit_coherence_tool_events(name, args, content)
+
+        from ..core.textutil import safe_clip
 
         self._emit(
             "tool_end",
@@ -606,8 +614,10 @@ class Agent:
                 "args": args,
                 "call_id": call_id,
                 "ok": not content.startswith("ERROR"),
-                "preview": content[:400],
-                "result": content[:12_000],
+                "preview": safe_clip(content, 400),
+                "result": safe_clip(content, 12_000, ellipsis="\n…[truncated]")
+                if len(content) > 12_000
+                else content,
                 "message": f"← {name} ({len(content)} chars)",
             },
         )
@@ -923,14 +933,26 @@ class Agent:
                 },
             )
             prior = "\n".join(f"- {s}" for s in step_notes) if step_notes else "(none)"
+            goal_hint = (user_text or "").strip().replace("\n", " ")[:240]
             step_body = (
                 f"[Plan step {i + 1}/{len(tasks)}] {title}\n"
                 f"{task.get('detail') or ''}\n\n"
-                f"Original goal: {user_text[:800]}\n"
-                f"Completed prior steps:\n{prior}\n\n"
-                "Complete ONLY this step using tools, then reply with a brief summary."
+                f"Goal (context only — do NOT re-do the whole goal): {goal_hint}\n"
+                f"Already done (do NOT repeat):\n{prior}\n\n"
+                "Complete ONLY this step's scope. Do not redo prior steps or pull in "
+                "later steps. Reply with a brief summary of what THIS step changed."
             )
-            step_msg = inject_contract_into_goal(step_body, shape_contract)
+            # Full shape contract only on step 1; later steps get a short reminder.
+            if i == 0:
+                step_msg = inject_contract_into_goal(step_body, shape_contract)
+            elif any(shape_contract.values()):
+                step_msg = (
+                    f"{step_body}\n\n"
+                    "Keep following the plan's shape contract from step 1 "
+                    "(reuse existing assets; no parallel reimplementation)."
+                )
+            else:
+                step_msg = step_body
             self.messages.append(
                 {
                     "role": "user",
@@ -947,7 +969,9 @@ class Agent:
                 compressed = True
             if step_cancelled:
                 was_cancelled = True
-            note = f"{title}: {(step_final or '').strip()[:400]}"
+            from ..core.textutil import safe_clip
+
+            note = f"{title}: {safe_clip((step_final or '').strip(), 400)}"
             step_notes.append(note)
             status = "done"
             if step_cancelled:
@@ -1137,7 +1161,14 @@ class Agent:
 
         return final, turned, was_cancelled, compressed
 
-    def run(self, user_text: str, *, mode: str = "agent", do_review: bool = True) -> AgentResult:
+    def run(
+        self,
+        user_text: str,
+        *,
+        mode: str = "agent",
+        do_review: bool = True,
+        display: str = "",
+    ) -> AgentResult:
         # Top-level turns reset cancel; subagents keep a cancel already set by parent.
         if not self.is_subagent:
             self.clear_cancel()
@@ -1149,16 +1180,33 @@ class Agent:
             self._refresh_workspace_grounding()
             self._apply_turn_coherence_policy(user_text)
         user_turn = sum(1 for m in self.messages if m.get("role") == "user")
-        self.messages.append({"role": "user", "content": user_text})
+        user_msg: dict[str, Any] = {"role": "user", "content": user_text}
+        disp = (display or "").strip()
+        if disp and disp != user_text:
+            user_msg["sidekick"] = {"display": disp}
+        self.messages.append(user_msg)
         self.turn_counter += 1
         if not self.is_subagent and self.session_id:
             from ..services import fs_undo
 
             fs_undo.push_checkpoint(self.session_id, user_turn)
             fs_undo.set_turn_context(self.session_id, user_turn)
+            # Checkpoint early so a restart mid-turn still keeps the user message.
+            try:
+                from ..services.store import STORE
+
+                STORE.persist(self.session_id)
+            except Exception as exc:
+                from ..core.logutil import get_logger, log_exception
+
+                log_exception(
+                    get_logger("metateam.agent"),
+                    f"early persist failed for {self.session_id}",
+                    exc,
+                )
         self._emit(
             "turn_start",
-            {"text": user_text[:500], "message": "user turn"},
+            {"text": (disp or user_text)[:500], "message": "user turn"},
         )
 
         max_iters = (

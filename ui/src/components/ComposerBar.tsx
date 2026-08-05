@@ -77,8 +77,6 @@ export type ComposerBarProps = {
   ctxPct: number;
   ctxWarn: boolean;
   ctx: { tokens: number; limit: number };
-  activeWs: { path: string; name: string } | null;
-  wsBusy: boolean;
   model: ModelSetup | null;
   modelSwitchRole: ModelRole;
   setModelSwitchRole: (role: ModelRole) => void;
@@ -137,8 +135,6 @@ export function ComposerBar({
   ctxPct,
   ctxWarn,
   ctx,
-  activeWs,
-  wsBusy,
   model,
   modelSwitchRole,
   setModelSwitchRole,
@@ -534,15 +530,6 @@ export function ComposerBar({
               {t("context")} {ctx.tokens}/{ctx.limit} · {ctxPct}%
             </span>
           </div>
-          <button
-            type="button"
-            className="chip muted status-link"
-            title={activeWs?.path || t("selectWorkspace")}
-            disabled={wsBusy}
-            onClick={() => onOpenSettings("workspace")}
-          >
-            <span className="ws-switcher-label">{activeWs?.name || t("selectWorkspace")}</span>
-          </button>
           <ModelSwitcher
             setup={model}
             locale={locale}

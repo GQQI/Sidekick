@@ -187,9 +187,13 @@ def _migrate_legacy_into_tenant(user_id: str) -> None:
                 pass
 
     # Move flat sessions into tenant folder (copy, keep originals as backup)
-    sess_root = ROOT / "sessions"
+    from ..core.config import REPO_ROOT
+
+    sess_roots = [ROOT / "sessions", REPO_ROOT / "backend" / "sessions"]
     dest_sess = tenant_sessions_dir(user_id)
-    if sess_root.is_dir():
+    for sess_root in sess_roots:
+        if not sess_root.is_dir():
+            continue
         for path in sess_root.glob("sess_*.json"):
             target = dest_sess / path.name
             if target.exists():

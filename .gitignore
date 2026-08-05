@@ -17,6 +17,9 @@ src/memory/**
 src/workspace/**
 !src/workspace/.gitkeep
 
+# Legacy / accidental runtime root (never commit)
+backend/
+
 # User-installed skills (keep only the placeholder)
 src/skills/**
 !src/skills/.gitkeep
@@ -38,6 +41,13 @@ tests/.scratch/
 ui/node_modules/
 ui/dist/
 frontend/
+
+# Desktop (Electron)
+desktop/node_modules/
+desktop/dist/
+
+# Local Python interpreter tip (machine-specific)
+.sidekick-python
 
 # OS / editor
 .DS_Store

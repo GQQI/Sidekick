@@ -71,6 +71,26 @@ def test_stale_index_rebuilds_after_delete() -> None:
     assert idx2.file_count() == 0
 
 
+def test_write_file_html_skips_align() -> None:
+    from metateam.core.config import get_settings
+
+    ws = _scratch() / "html_gate"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "existing.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+    s = get_settings()
+    prev = s.workspace
+    s.workspace = ws
+    try:
+        settings = Settings(workspace=ws, allow_shell=False, demo_mode=True)
+        reg = build_registry(settings, skills=[])
+        write = reg.get("write_file")
+        assert write is not None
+        ok = write.handler(path="deck.html", content="<html><body>hi</body></html>\n")
+        assert ok.startswith("wrote"), ok
+    finally:
+        s.workspace = prev
+
+
 def test_write_file_requires_align_for_new_code() -> None:
     from metateam.core.config import get_settings
 

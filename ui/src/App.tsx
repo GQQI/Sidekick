@@ -27,6 +27,14 @@ import {
   IconPlus,
   IconSun,
 } from "./components/icons";
+import {
+  loadExplorerCollapsed,
+  loadExplorerWidth,
+  loadSidePanel,
+  saveExplorerCollapsed,
+  saveExplorerWidth,
+  saveSidePanel,
+} from "./layoutPersist";
 import { saveActiveSessionId } from "./sessionPersist";
 import { usePrefs } from "./prefs";
 import { atFileMenuQuery } from "./components/AtFileMenu";
@@ -60,14 +68,22 @@ import {
 } from "./types/chat";
 import type { ActivePlan, PlanConfirmState } from "./types/plan";
 import {
+  chipLabelForDom,
+  formatDomElementForAgent,
+} from "./browser/protocol";
+import {
   fileToDetail,
   formatArgs,
   formatBytes,
+  uid,
   writeFilePreview,
 } from "./utils/chatHelpers";
 import { ActivitySidebar } from "./components/ActivitySidebar";
+import type { BrowserOpenRequest } from "./components/BrowserPanel";
 import { ChatThread } from "./components/ChatThread";
 import { ComposerBar } from "./components/ComposerBar";
+import { LinkifiedText } from "./components/LinkifiedText";
+import { SandboxUrlPrompt, type SandboxUrlPromptState } from "./components/SandboxUrlPrompt";
 import { SettingsModal } from "./components/SettingsModal";
 import { useSessionBootstrap } from "./hooks/useSessionBootstrap";
 import { useChatStream } from "./hooks/useChatStream";
@@ -129,9 +145,11 @@ export function App() {
     after?: number;
   } | null>(null);
   const [toast, setToast] = useState("");
-  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
-  const [sidePanel, setSidePanel] = useState<"files" | "search" | "history">("files");
-  const [explorerWidth, setExplorerWidth] = useState(280);
+  const [explorerCollapsed, setExplorerCollapsed] = useState(loadExplorerCollapsed);
+  const [sidePanel, setSidePanel] = useState(loadSidePanel);
+  const [sandboxUrlPrompt, setSandboxUrlPrompt] = useState<SandboxUrlPromptState | null>(null);
+  const [browserOpenRequest, setBrowserOpenRequest] = useState<BrowserOpenRequest | null>(null);
+  const [explorerWidth, setExplorerWidth] = useState(() => loadExplorerWidth(280));
   const [detailWidth, setDetailWidth] = useState(420);
   const [fsRefresh, setFsRefresh] = useState(0);
   const [detail, setDetail] = useState<DetailView>(null);
@@ -350,6 +368,24 @@ export function App() {
   newChatRef.current = actions.newChat;
 
   useEffect(() => {
+    saveSidePanel(sidePanel);
+  }, [sidePanel]);
+
+  useEffect(() => {
+    if (sidePanel === "browser" && !explorerCollapsed) {
+      setExplorerWidth((w) => (w < 520 ? 640 : w));
+    }
+  }, [sidePanel, explorerCollapsed]);
+
+  useEffect(() => {
+    saveExplorerCollapsed(explorerCollapsed);
+  }, [explorerCollapsed]);
+
+  useEffect(() => {
+    saveExplorerWidth(explorerWidth);
+  }, [explorerWidth]);
+
+  useEffect(() => {
     void (async () => {
       try {
         const status = await fetchAuthStatus();
@@ -422,16 +458,52 @@ export function App() {
     if (!stickBottomRef.current) return;
     const el = threadRef.current;
     if (el) {
+      // Re-check: user may have scrolled away between the render and this effect.
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (dist >= 80) {
+        stickBottomRef.current = false;
+        return;
+      }
       el.scrollTop = el.scrollHeight;
     } else {
       bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
     }
   }, [messages, busy, compressState?.active]);
 
+  // Unpin stick-to-bottom as soon as the user scrolls up (wheel/touch), so
+  // streaming token updates cannot yank the viewport back down.
+  useEffect(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    const unpinIfUp = (deltaY: number) => {
+      if (deltaY < 0) stickBottomRef.current = false;
+    };
+    const onWheel = (e: WheelEvent) => unpinIfUp(e.deltaY);
+    let touchY: number | null = null;
+    const onTouchStart = (e: TouchEvent) => {
+      touchY = e.touches[0]?.clientY ?? null;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY;
+      if (touchY != null && y != null) unpinIfUp(touchY - y);
+      touchY = y ?? touchY;
+    };
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
+  }, [bootReady]);
+
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (resizingRef.current) {
-        const next = Math.min(520, Math.max(200, e.clientX - 64));
+        // Browser preview needs a wide panel; allow up to ~72% of the window.
+        const maxW = Math.min(1200, Math.max(520, Math.floor(window.innerWidth * 0.72)));
+        const next = Math.min(maxW, Math.max(200, e.clientX - 64));
         setExplorerWidth(next);
         setExplorerCollapsed(false);
       }
@@ -525,7 +597,13 @@ export function App() {
     const el = threadRef.current;
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickBottomRef.current = dist < 100;
+    stickBottomRef.current = dist < 80;
+  }
+
+  function openDetail(d: DetailView) {
+    // Inspecting prior tool/file results: stop following the live stream.
+    stickBottomRef.current = false;
+    setDetail(d);
   }
 
   const brandSub = useMemo(() => {
@@ -739,6 +817,20 @@ export function App() {
         </div>
       </header>
 
+      <SandboxUrlPrompt
+        prompt={sandboxUrlPrompt}
+        onCancel={() => setSandboxUrlPrompt(null)}
+        onConfirm={() => {
+          if (!sandboxUrlPrompt) return;
+          const target = sandboxUrlPrompt.url;
+          setSandboxUrlPrompt(null);
+          setBrowserOpenRequest({ url: target, nonce: Date.now() });
+          setSidePanel("browser");
+          setExplorerCollapsed(false);
+          setExplorerWidth((w) => (w < 520 ? 640 : w));
+          setToast(t("browserOpenConfirm"));
+        }}
+      />
       {toast && (
         <div className="toast" onClick={() => setToast("")}>
           {toast}
@@ -838,7 +930,7 @@ export function App() {
               onNewChat={actions.newChat}
               onDeleteSession={actions.removeSession}
               onOpenSettings={() => dialogs.openSettings()}
-              onOpenFile={(file, opts) => setDetail(fileToDetail(file, opts))}
+              onOpenFile={(file, opts) => openDetail(fileToDetail(file, opts))}
               onFileDeleted={(path) => {
                 setDetail((d) => {
                   if (d?.type !== "file") return d;
@@ -851,6 +943,20 @@ export function App() {
                 resizingRef.current = true;
                 document.body.classList.add("resizing-sidebar");
               }}
+              onPickDomElement={(el) => {
+                setAttachments((prev) => [
+                  ...prev,
+                  {
+                    id: uid(),
+                    name: chipLabelForDom(el),
+                    path: el.xpath || el.css_path || el.url || "dom",
+                    kind: "dom-element",
+                    text: formatDomElementForAgent(el),
+                  },
+                ]);
+                setToast(t("browserElementAdded"));
+              }}
+              browserOpenRequest={browserOpenRequest}
             />
         <section className="chat pane">
           <ChatThread
@@ -867,7 +973,7 @@ export function App() {
             threadRef={threadRef}
             bottomRef={bottomRef}
             onThreadScroll={onThreadScroll}
-            onSetDetail={setDetail}
+            onSetDetail={openDetail}
             onSend={actions.send}
             onStopChat={chat.stopChat}
             onCopyBubble={actions.copyBubble}
@@ -875,6 +981,7 @@ export function App() {
             onEditDraftChange={setEditDraft}
             onCancelEdit={actions.cancelEdit}
             onRequestSubmitEdit={actions.requestSubmitEdit}
+            onCtrlClickUrl={(url, x, y) => setSandboxUrlPrompt({ url, x, y })}
             onToast={setToast}
           />
           <ComposerBar
@@ -913,8 +1020,6 @@ export function App() {
             ctxPct={ctxPct}
             ctxWarn={ctxWarn}
             ctx={ctx}
-            activeWs={activeWs}
-            wsBusy={wsBusy}
             model={model}
             modelSwitchRole={modelSwitchRole}
             setModelSwitchRole={setModelSwitchRole}
@@ -1048,14 +1153,18 @@ export function App() {
                 {detail.tool.status !== "streaming" || !isFileMutatingTool(detail.tool.name) ? (
                   <>
                     <h4>{t("detailOutput")}</h4>
-                    <pre className="code-fence">
-                      {detail.tool.result ||
+                    <LinkifiedText
+                      className="code-fence"
+                      text={
+                        detail.tool.result ||
                         (detail.tool.status === "streaming"
                           ? t("toolArgsStreaming")
                           : detail.tool.status === "running" || detail.tool.status === "pending"
                             ? t("toolRunning")
-                            : t("toolNoOutput"))}
-                    </pre>
+                            : t("toolNoOutput"))
+                      }
+                      onCtrlClickUrl={(url, x, y) => setSandboxUrlPrompt({ url, x, y })}
+                    />
                   </>
                 ) : null}
               </div>
@@ -1099,6 +1208,9 @@ export function App() {
                             <MarkdownView
                               content={item.text}
                               streaming={item.streaming && !item.reasoningStreaming}
+                              onCtrlClickUrl={(url, x, y) =>
+                                setSandboxUrlPrompt({ url, x, y })
+                              }
                             />
                           ) : null}
                         </article>
@@ -1125,7 +1237,13 @@ export function App() {
                           <span className="tool-chip-summary">{tool.summary}</span>
                         </span>
                         {tool.result && (
-                          <pre className="subagent-tool-result">{tool.result.slice(0, 2000)}</pre>
+                          <LinkifiedText
+                            className="subagent-tool-result"
+                            text={tool.result.slice(0, 2000)}
+                            onCtrlClickUrl={(url, x, y) =>
+                              setSandboxUrlPrompt({ url, x, y })
+                            }
+                          />
                         )}
                       </div>
                     );

@@ -14,13 +14,17 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 # Absolute / drive / UNC / home-relative path-like tokens in a shell command.
+# Drive letters use a lookbehind so `https://…` does not match as `s:/…`.
 _PATH_TOKEN_RE = re.compile(
     r"(?:"
-    r'(?P<q>["\'])(?P<qp>(?:[A-Za-z]:[\\/]|\\\\|~/|/)[^"\']*)(?P=q)'
+    r'(?P<q>["\'])(?P<qp>(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\\\\|~/|/)[^"\']*)(?P=q)'
     r"|"
-    r"(?P<u>(?:[A-Za-z]:[\\/]|\\\\|~/|/)[^\s\"';|&<>]+)"
+    r"(?P<u>(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\\\\|~/|/)[^\s\"';|&<>]+)"
     r")"
 )
+
+# http(s)/ftp/… URLs are not filesystem paths — mask before path scanning.
+_URL_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s\"'|&<>]+", re.IGNORECASE)
 
 # Relative segments that climb out of cwd when resolved.
 _DOTDOT_RE = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
@@ -85,12 +89,29 @@ def path_allowed(path: Path, policy: ShellSandboxPolicy) -> bool:
     return False
 
 
+def _mask_urls(command: str) -> str:
+    """Replace URL spans so path heuristics do not treat them as file paths."""
+    return _URL_RE.sub(" ", command or "")
+
+
+def _is_url_like(token: str) -> bool:
+    t = (token or "").strip().strip("'\"")
+    if not t:
+        return False
+    if _URL_RE.match(t):
+        return True
+    # Mis-parsed remnant of https://host → s://host
+    if re.match(r"^[a-z]://", t, re.IGNORECASE):
+        return True
+    return False
+
+
 def _extract_path_candidates(command: str) -> list[str]:
     found: list[str] = []
-    for m in _PATH_TOKEN_RE.finditer(command or ""):
+    for m in _PATH_TOKEN_RE.finditer(_mask_urls(command)):
         raw = m.group("qp") or m.group("u") or ""
         raw = raw.strip()
-        if raw:
+        if raw and not _is_url_like(raw):
             found.append(raw)
     return found
 
@@ -140,8 +161,12 @@ def check_command(
 def sandbox_env(base: Optional[dict[str, str]] = None) -> dict[str, str]:
     """Env for sandboxed subprocess — keep PATH/HOME, drop obvious secrets noise optional."""
     src = dict(base or os.environ)
-    # Always force UTF-8 for Python child output
+    # Always force UTF-8 for Python / console child output (avoid Windows GBK crashes)
     src["PYTHONIOENCODING"] = "utf-8"
+    src["PYTHONUTF8"] = "1"
+    if os.name == "nt":
+        # Hint many CLIs / PowerShell toward UTF-8 instead of OEM/GBK
+        src.setdefault("LANG", "en_US.UTF-8")
     src["SIDEKICK_SHELL_SANDBOX"] = "1"
     return src
 

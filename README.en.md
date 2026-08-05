@@ -42,6 +42,7 @@ Runs locally. Bring your own API key. History, Memory, and workspace stay on dis
 |---|---|
 | **Chat + tools** | SSE streaming, attachments, stop cleanly, edit & resend (optionally restore files to that step) |
 | **Files** | Create / rename / delete (confirm) / drag-move; search by name **and** content with line jump |
+| **Browser sandbox** | Desktop: live Electron BrowserView; Web: Playwright screenshots; Select Mode → chat; agent `browser_*` tools |
 | **Memory** | Append, remove, or rewrite `MEMORY.md` (approval required) |
 | **Skills** | Drop packs under `src/skills/`, invoke with `/skill <name>` |
 | **Models** | Separate main, sub-agent, and compress models |
@@ -49,7 +50,16 @@ Runs locally. Bring your own API key. History, Memory, and workspace stay on dis
 
 ### Slash commands
 
-`/help` · `/new` · `/clear` · `/skills` · `/skill <name>` · `/memory` · `/history` · `/stop`
+`/help` · `/new` · `/clear` · `/skills` · `/skill <name>` · `/memory` · `/history` · `/browser` · `/stop`
+
+Browser sandbox needs Playwright Chromium once:
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+See [docs/browser-sandbox.md](docs/browser-sandbox.md).
 
 ---
 
@@ -75,17 +85,28 @@ python3 -m pip install -r requirements.txt
 python3 main.py
 ```
 
-Open **http://127.0.0.1:8787** → pick a workspace folder → Settings → Model → API key  
-(or copy `src/data/model.json.example` → `src/data/model.json`).
+Open **http://127.0.0.1:8787** → pick a workspace folder → Settings → Model → API key
 
-> Never commit real keys, `.env`, or chat history (see `.gitignore`).
+### Desktop app (live embedded browser)
+
+Double-click **`start-desktop.bat`** to auto-install Python deps, Playwright Chromium (if needed), desktop/UI npm packages, build the UI, and launch Electron with a **live BrowserView** preview (not screenshots).
+
+```powershell
+.\start-desktop.bat
+```
+
+Optional: `SIDEKICK_PYTHON` or `.sidekick-python` for the interpreter. Prefer `http://localhost:PORT` for local Vite apps on Windows.
+
+See [desktop/README.md](desktop/README.md) · [docs/browser-sandbox.md](docs/browser-sandbox.md).
+
+> Never commit real keys, `.env`, sessions, or `model.json` (see `.gitignore`).
 
 ### Local security (defaults)
 
 - Binds `127.0.0.1` only; non-loopback bind requires `META_ALLOW_REMOTE=1` (unsafe).
 - API requires a local token (`X-Sidekick-Token`, stored in `src/data/.local_token`); the UI fetches it via `/api/bootstrap`.
 - API keys in `model.json` are encrypted at rest (`src/data/.secret_key`).
-- Shell tools are off by default (`META_ALLOW_SHELL=0`); when enabled they still go through the agent approval gate.
+- Shell tools are on by default (`META_ALLOW_SHELL=1`) and still go through the agent approval gate; set `0` to disable entirely.
 - **Approval boundary:** ApprovalGate covers agent tool calls; UI file writes rely on the local token plus in-app confirm dialogs.
 
 ### UI (optional)
@@ -137,8 +158,10 @@ Sidekick/
 ├── src/sessions/     # sessions (local, not committed)
 ├── src/workspace/    # default workspace placeholder
 ├── ui/               # Vite control UI
-├── docs/screenshots/
+├── desktop/          # Electron shell (live embedded browser)
+├── docs/
 ├── main.py
+├── start-desktop.bat # one-click deps + desktop
 ├── requirements.txt
 ├── README.md
 └── README.en.md

@@ -47,6 +47,7 @@ export type ChatThreadProps = {
   onCancelEdit: () => void;
   onRequestSubmitEdit: (msgId: string) => void;
   onToast: (msg: string) => void;
+  onCtrlClickUrl?: (url: string, clientX: number, clientY: number) => void;
 };
 
 export function ChatThread({
@@ -72,6 +73,7 @@ export function ChatThread({
   onCancelEdit,
   onRequestSubmitEdit,
   onToast,
+  onCtrlClickUrl,
 }: ChatThreadProps) {
   return (
     <>
@@ -340,6 +342,7 @@ export function ChatThread({
                   <MarkdownView
                     content={m.content}
                     streaming={m.streaming && !m.reasoningStreaming}
+                    onCtrlClickUrl={onCtrlClickUrl}
                   />
                 ) : m.streaming && !m.reasoningStreaming ? (
                   <div className="plain muted">…</div>

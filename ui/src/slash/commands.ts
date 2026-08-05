@@ -111,6 +111,12 @@ export const BASE_COMMANDS: SlashCommandDef[] = [
     description: "展开文件浏览器",
   },
   {
+    id: "browser",
+    name: "browser",
+    aliases: ["preview", "sandbox"],
+    description: "打开浏览器沙盒（Select Mode）",
+  },
+  {
     id: "settings",
     name: "settings",
     aliases: ["config"],

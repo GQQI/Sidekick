@@ -2,6 +2,8 @@
 """needs_plan is model-driven; tests cover parsing + skill goal extraction."""
 
 from metateam.runtime.plan import (
+    _obviously_simple_goal,
+    _parse_plan_json,
     extract_plan_goal,
     needs_plan,
     parse_needs_plan_reply,
@@ -54,8 +56,10 @@ def test_needs_plan_uses_model_and_skips_empty_goal():
     assert needs_plan(llm, "make an html presentation") is True
     assert llm.calls
 
-    llm2 = _FakeLLM('{"plan": false}')
+    # Short single-file tweaks short-circuit without calling the model.
+    llm2 = _FakeLLM('{"plan": true}')
     assert needs_plan(llm2, "fix typo in readme") is False
+    assert not llm2.calls
 
     huge = (
         "### \u3010Skill \u5df2\u6ce8\u5165\u3011demo\n\n"
@@ -72,3 +76,37 @@ def test_needs_plan_uses_model_and_skips_empty_goal():
 def test_needs_plan_defaults_false_on_failure():
     assert needs_plan(_FakeLLM("nonsense"), "do something complex please") is False
     assert needs_plan(_FakeLLM("", fail=True), "do something complex please") is False
+
+
+def test_obviously_simple_goal():
+    assert _obviously_simple_goal("改六个图片") is True
+    assert _obviously_simple_goal("替换 index.html 里重复的图片") is True
+    assert _obviously_simple_goal("从零搭建整站架构并做多模块迁移") is False
+
+
+def test_parse_plan_json_salvages_broken_verify_command():
+    # Nested PowerShell quotes used to break JSON and dump the blob into summary.
+    broken = (
+        '{\n'
+        '  "summary": "修改HTML，使六个图片标签引用六张不同的图片，消除重复",\n'
+        '  "shape_contract": {\n'
+        '    "reuse": "复用现有的index.html",\n'
+        '    "create_only_if": "无需新建",\n'
+        '    "config_placement": "直接替换",\n'
+        '    "control_flow": "线性步骤",\n'
+        '    "why_not_smaller": "无法更简化",\n'
+        '    "verify_command": "powershell -Command \\"$html=Get-Content index.html -Raw; '
+        "$matches=[regex]::Matches($html,'<img[^>]*src=\\\\\\\"([^\\\\\\\\\\\\\\\"]*)\\\\\\\"')\"\n"
+        "  },\n"
+        '  "tasks": [\n'
+        '    {"title": "定位重复图片", "detail": "检查 src"},\n'
+        '    {"title": "替换为六张不同图", "detail": "改六个 img"}\n'
+        "  ]\n"
+        "}"
+    )
+    data = _parse_plan_json(broken)
+    assert data["summary"] == "修改HTML，使六个图片标签引用六张不同的图片，消除重复"
+    assert not str(data.get("summary", "")).startswith("{")
+    titles = [t["title"] for t in data.get("tasks") or []]
+    assert "定位重复图片" in titles
+    assert "替换为六张不同图" in titles

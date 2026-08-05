@@ -223,10 +223,21 @@ export type SessionsPage = {
   total_pages: number;
 };
 
+export type SessionDetailMessage = {
+  role: string;
+  content?: string;
+  reasoning?: string;
+  name?: string;
+  call_id?: string;
+  args?: unknown;
+  result?: string;
+  status?: string;
+};
+
 export type SessionDetail = {
   id: string;
   title: string;
-  messages: { role: string; content: string }[];
+  messages: SessionDetailMessage[];
   tokens: number;
   limit?: number;
   demo: boolean;
@@ -414,6 +425,74 @@ export const searchFiles = (q: string, path = ".") =>
   json<{ query: string; hits: SearchHit[] }>(
     `/api/files/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
   );
+
+export type BrowserStatus = {
+  host: string;
+  available: boolean;
+  message: string;
+  session: { url: string; started_at: number; ready: boolean; host: string } | null;
+};
+
+export const browserStatus = () => json<BrowserStatus>("/api/browser/status");
+export const browserStart = (url = "", headless = false) =>
+  json<{ host: string; url: string; started_at: number; ready: boolean }>(
+    "/api/browser/session",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, headless }),
+    },
+  );
+export const browserClose = () =>
+  json<{ status: string }>("/api/browser/session", { method: "DELETE" });
+export const browserNavigate = (url: string) =>
+  json<{ host: string; url: string; started_at: number; ready: boolean }>(
+    "/api/browser/navigate",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    },
+  );
+export const browserSelect = (timeout_ms = 60000, with_screenshot = true) =>
+  json<{ ok: boolean; element: Record<string, unknown> | null; message?: string }>(
+    "/api/browser/select",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timeout_ms, with_screenshot }),
+    },
+  );
+export const browserSelectCancel = () =>
+  json<{ status: string }>("/api/browser/select/cancel", { method: "POST" });
+export const browserScreenshotUrl = (bust = Date.now()) => {
+  const q = new URLSearchParams({ t: String(bust) });
+  if (_token) q.set("token", _token);
+  return `/api/browser/screenshot?${q.toString()}`;
+};
+
+/** Fetch screenshot as a blob URL (revoker must call URL.revokeObjectURL). */
+export async function browserFetchScreenshot(fullPage = false): Promise<string> {
+  const headers = await authHeaders();
+  const q = fullPage ? "?full_page=true" : "";
+  const r = await fetch(`${BASE}/api/browser/screenshot${q}`, { headers });
+  if (!r.ok) {
+    let detail = `screenshot failed: ${r.status}`;
+    try {
+      const body = (await r.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      try {
+        detail = (await r.text()) || detail;
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new Error(detail);
+  }
+  const blob = await r.blob();
+  return URL.createObjectURL(blob);
+}
 export const uploadFile = async (file: File) => {
   const fd = new FormData();
   fd.append("file", file);
@@ -585,6 +664,7 @@ export async function streamChat(
   handlers: ChatHandlers,
   signal?: AbortSignal,
   mode: "plan" | "agent" = "agent",
+  display?: string,
 ): Promise<string | null> {
   let r: Response;
   try {
@@ -592,10 +672,16 @@ export async function streamChat(
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     });
+    const body: Record<string, unknown> = {
+      message,
+      session_id: sessionId,
+      mode,
+    };
+    if (display && display !== message) body.display = display;
     r = await fetch(`${BASE}/api/chat`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ message, session_id: sessionId, mode }),
+      body: JSON.stringify(body),
       signal,
     });
   } catch (e) {

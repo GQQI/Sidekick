@@ -42,6 +42,7 @@
 |---|---|
 | **对话 + 工具** | SSE 流式、附件、干净停止、编辑重发（可选恢复文件到该步） |
 | **文件** | 新建 / 重命名 / 删除确认 / 拖拽移动；按文件名**与**内容搜索并跳行 |
+| **浏览器沙盒** | CDP/Playwright Chromium：预览本地站、Select Mode 点选 DOM 发给 Agent；Agent 可用 browser_* 工具验收 |
 | **Memory** | 追加、删除或覆写 `MEMORY.md`（需确认） |
 | **Skills** | 放到 `src/skills/`，`/skill <名称>` 调用 |
 | **模型** | 主模型 / 子模型 / 压缩模型可分开配置 |
@@ -49,7 +50,16 @@
 
 ### 斜杠命令
 
-`/help` · `/new` · `/clear` · `/skills` · `/skill <名称>` · `/memory` · `/history` · `/stop`
+`/help` · `/new` · `/clear` · `/skills` · `/skill <名称>` · `/memory` · `/history` · `/browser` · `/stop`
+
+浏览器沙盒依赖 Playwright Chromium（一次性）：
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+详见 [docs/browser-sandbox.md](docs/browser-sandbox.md)。
 
 ---
 
@@ -78,14 +88,35 @@ python3 main.py
 打开 **http://127.0.0.1:8787** → 选工作区文件夹 → 设置 → 模型 → API Key  
 （或复制 `src/data/model.json.example` → `src/data/model.json`）
 
-> 切勿提交真实 Key、`.env` 或对话历史（见 `.gitignore`）。
+### 桌面应用（对齐 Cursor：实时内嵌预览）
+
+推荐日常用桌面壳——侧栏浏览器是 **Electron BrowserView 实时页面**（可点选、滚动、HMR），不是截图。
+
+双击 **`start-desktop.bat`** 会自动：
+
+1. `pip install -r requirements.txt`（含 Playwright）
+2. 如缺则 `playwright install chromium`（Agent 浏览器工具）
+3. 安装 `desktop/` / `ui/` 的 npm 依赖并构建 UI
+4. 启动 Electron（后端缺省时自动拉起）
+
+```powershell
+.\start-desktop.bat
+```
+
+也可设置解释器：`set SIDEKICK_PYTHON=C:\path\to\python.exe`，或写入 `.sidekick-python`。
+
+打开侧栏「浏览器」，或对话里 **Ctrl+点击**本地链接 →「在沙盒打开」。本地预览请优先用 `http://localhost:端口`（Windows 上 Vite 常只监听 IPv6，`127.0.0.1` 可能连不上）。
+
+详见 [desktop/README.md](desktop/README.md) · [docs/browser-sandbox.md](docs/browser-sandbox.md)。
+
+> 切勿提交真实 Key、`.env`、会话或 `model.json`（见 `.gitignore`）。
 
 ### 本机安全（默认）
 
 - 仅绑定 `127.0.0.1`；非本机绑定需显式 `META_ALLOW_REMOTE=1`（不安全）。
 - API 需本地令牌（`X-Sidekick-Token`，启动时写入 `src/data/.local_token`）；UI 经 `/api/bootstrap` 自动获取。
 - `model.json` 中的 API Key 使用本机密钥加密存储（`src/data/.secret_key`）。
-- Shell 工具默认关闭（`META_ALLOW_SHELL=0`）；开启后仍走 Agent 审批门。
+- Shell 工具默认开启（`META_ALLOW_SHELL=1`），仍走 Agent 审批门；设为 `0` 可完全关闭。
 - **审批边界**：ApprovalGate 约束 Agent 工具调用；UI 直接写文件走本机令牌 + 前端确认框。
 
 ### UI（可选）
@@ -137,8 +168,10 @@ Sidekick/
 ├── src/sessions/     # 会话（本地，不提交）
 ├── src/workspace/    # 默认工作区占位
 ├── ui/               # Vite 控制界面
-├── docs/screenshots/
+├── desktop/          # Electron 桌面壳（实时内嵌浏览器）
+├── docs/
 ├── main.py
+├── start-desktop.bat # 一键装依赖并启动桌面端
 ├── requirements.txt
 ├── README.md
 └── README.en.md

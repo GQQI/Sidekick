@@ -74,7 +74,9 @@ def test_shell_argv_shape():
 
     argv = _shell_argv("echo hi")
     if os.name == "nt":
-        assert argv[:3] == ["cmd.exe", "/d", "/c"]
-        assert argv[3] == "echo hi"
+        assert argv[0] == "powershell.exe"
+        assert "-Command" in argv
+        assert "echo hi" in argv[-1]
+        assert "UTF8Encoding" in argv[-1]
     else:
         assert argv[:2] == ["/bin/bash", "-lc"]

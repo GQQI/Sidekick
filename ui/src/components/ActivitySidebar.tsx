@@ -1,16 +1,19 @@
+import type { SidePanel } from "../layoutPersist";
 import { FileExplorer } from "./FileExplorer";
 import { FileSearchPanel } from "./FileSearchPanel";
 import { HistoryPanel } from "./HistoryPanel";
-import { IconClock, IconFiles, IconSearch, IconSettings } from "./icons";
+import { BrowserPanel, type BrowserOpenRequest } from "./BrowserPanel";
+import { IconClock, IconFiles, IconGlobe, IconSearch, IconSettings } from "./icons";
 import { IconRobotCube } from "./IconRobotCube";
 import type { SessionItem } from "../api";
 import { fileToDetail } from "../utils/chatHelpers";
 import type { MsgKey } from "../i18n";
+import type { DomElementPayload } from "../browser/protocol";
 
 export type ActivitySidebarProps = {
   t: (key: MsgKey, ...args: string[]) => string;
-  sidePanel: "files" | "search" | "history";
-  setSidePanel: (panel: "files" | "search" | "history") => void;
+  sidePanel: SidePanel;
+  setSidePanel: (panel: SidePanel) => void;
   explorerCollapsed: boolean;
   setExplorerCollapsed: (v: boolean) => void;
   explorerWidth: number;
@@ -30,6 +33,8 @@ export type ActivitySidebarProps = {
   onOpenFile: (file: Parameters<typeof fileToDetail>[0], opts?: Parameters<typeof fileToDetail>[1]) => void;
   onFileDeleted: (path: string) => void;
   onResizeStart: () => void;
+  onPickDomElement: (el: DomElementPayload) => void;
+  browserOpenRequest?: BrowserOpenRequest | null;
 };
 
 export function ActivitySidebar({
@@ -55,6 +60,8 @@ export function ActivitySidebar({
   onOpenFile,
   onFileDeleted,
   onResizeStart,
+  onPickDomElement,
+  browserOpenRequest,
 }: ActivitySidebarProps) {
   return (
     <>
@@ -98,6 +105,23 @@ export function ActivitySidebar({
           >
             <IconFiles size={18} />
             <span>{t("navFiles")}</span>
+          </button>
+          <button
+            type="button"
+            className={`activity-btn${sidePanel === "browser" && !explorerCollapsed ? " active" : ""}`}
+            title={t("navBrowser")}
+            onClick={() => {
+              if (sidePanel === "browser" && !explorerCollapsed) {
+                setExplorerCollapsed(true);
+              } else {
+                setSidePanel("browser");
+                setExplorerCollapsed(false);
+              }
+            }}
+            data-panel="browser"
+          >
+            <IconGlobe size={18} />
+            <span>{t("navBrowser")}</span>
           </button>
           <button
             type="button"
@@ -150,6 +174,13 @@ export function ActivitySidebar({
                 onOpen={(id) => void onOpenSession(id)}
                 onNew={() => void onNewChat()}
                 onDelete={(id) => onDeleteSession(id)}
+              />
+            </div>
+          ) : sidePanel === "browser" ? (
+            <div className="side-panel-wrap" style={{ width: explorerWidth }}>
+              <BrowserPanel
+                onPickElement={onPickDomElement}
+                openRequest={browserOpenRequest}
               />
             </div>
           ) : (

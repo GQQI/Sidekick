@@ -17,6 +17,7 @@ class SessionMeta:
     workspace: str
     updated_at: str = ""
     user_id: str = ""
+    title: str = ""
 
 
 def _now_id() -> str:
@@ -28,11 +29,12 @@ def _now_iso() -> str:
 
 
 def sessions_dir(root: Path, user_id: Optional[str] = None) -> Path:
-    """Per-user sessions directory; also accepts legacy flat src/sessions/*.json."""
-    from .tenant_context import get_user_id, tenant_sessions_dir
+    """Per-user sessions directory under ``root/sessions/<user_id>/``."""
+    from .tenant_context import get_user_id
 
-    uid = user_id if user_id is not None else get_user_id()
-    d = tenant_sessions_dir(uid)
+    uid = (user_id if user_id is not None else get_user_id()) or "default"
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in uid)[:64] or "default"
+    d = Path(root) / "sessions" / safe
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -51,6 +53,7 @@ def save_session(
     workspace: Path,
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    title: str = "",
 ) -> Path:
     from .tenant_context import get_user_id
 
@@ -58,11 +61,13 @@ def save_session(
     sid = session_id or _now_id()
     path = sessions_dir(root, uid) / f"{sid}.json"
     created = _now_iso()
+    prev_title = ""
     if path.exists():
         try:
             old_meta, _ = load_session(path)
             if old_meta.created_at:
                 created = old_meta.created_at
+            prev_title = old_meta.title or ""
         except Exception:
             pass
     meta = SessionMeta(
@@ -72,6 +77,7 @@ def save_session(
         model=model,
         workspace=str(workspace),
         user_id=uid,
+        title=(title or prev_title or "").strip(),
     )
     path.write_text(
         json.dumps({"meta": asdict(meta), "messages": messages}, ensure_ascii=False, indent=2),
@@ -90,6 +96,7 @@ def load_session(path: Path) -> tuple[SessionMeta, list[dict[str, Any]]]:
         model=str(m.get("model") or ""),
         workspace=str(m.get("workspace") or ""),
         user_id=str(m.get("user_id") or ""),
+        title=str(m.get("title") or ""),
     )
     messages = data.get("messages") or []
     if not isinstance(messages, list):

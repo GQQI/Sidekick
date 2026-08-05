@@ -490,7 +490,17 @@ export function handleRuntimeEvent(ev: RuntimeEvent, ctx: RuntimeEventHandlerCtx
       };
       ctx.updateMsg(hit.id, { tool });
       ctx.syncToolPanel(tool, prevCallId);
-      if (isFileMutatingTool(tool.name)) ctx.setDetail({ type: "tool", tool });
+      // Don't steal the detail panel if the user is inspecting another tool/file.
+      if (isFileMutatingTool(tool.name)) {
+        ctx.setDetail((d) => {
+          if (d == null) return { type: "tool", tool };
+          if (d.type !== "tool") return d;
+          const same =
+            d.tool.id === tool.id ||
+            (Boolean(tool.callId) && d.tool.callId === tool.callId);
+          return same ? { type: "tool", tool } : d;
+        });
+      }
     }
   }
   if (type === "approval_resolved") {

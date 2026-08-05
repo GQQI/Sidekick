@@ -41,7 +41,7 @@ export type SessionBootstrapDeps = {
   streamTextRef: React.MutableRefObject<string>;
   streamReasoningRef: React.MutableRefObject<string>;
   nativeReasoningRef: React.MutableRefObject<boolean>;
-  setSidePanel: (p: "files" | "search" | "history") => void;
+  setSidePanel: (p: "files" | "search" | "history" | "browser") => void;
   setExplorerCollapsed: (v: boolean) => void;
 };
 

@@ -17,6 +17,21 @@ export type ToolUpsertCtx = {
   transcriptRef: React.MutableRefObject<ChatMsg[]>;
 };
 
+/** Auto-open / refresh write_file preview only when it won't steal focus. */
+function revealWriteFileDetail(
+  setDetail: React.Dispatch<React.SetStateAction<DetailView>>,
+  tool: ToolCard,
+) {
+  setDetail((d) => {
+    if (d == null) return { type: "tool", tool };
+    if (d.type !== "tool") return d;
+    const same =
+      d.tool.id === tool.id ||
+      (Boolean(tool.callId) && d.tool.callId === tool.callId);
+    return same ? { type: "tool", tool } : d;
+  });
+}
+
 export function upsertToolStart(ev: RuntimeEvent, ctx: ToolUpsertCtx) {
   ctx.sealStreamBubble();
   const callId = String(ev.data.call_id || uid());
@@ -44,7 +59,7 @@ export function upsertToolStart(ev: RuntimeEvent, ctx: ToolUpsertCtx) {
     ctx.syncToolPanel(tool, prevCallId);
     if (name === "write_file") {
       const preview = writeFilePreview(tool.args);
-      if (preview) ctx.setDetail({ type: "tool", tool });
+      if (preview) revealWriteFileDetail(ctx.setDetail, tool);
     }
     return tool;
   }
@@ -59,7 +74,7 @@ export function upsertToolStart(ev: RuntimeEvent, ctx: ToolUpsertCtx) {
   };
   ctx.appendMsg({ id: tool.id, role: "tool", content: "", tool });
   ctx.syncToolPanel(tool);
-  if (name === "write_file") ctx.setDetail({ type: "tool", tool });
+  if (name === "write_file") revealWriteFileDetail(ctx.setDetail, tool);
   return tool;
 }
 
@@ -107,7 +122,7 @@ export function upsertToolDelta(ev: RuntimeEvent, ctx: ToolUpsertCtx) {
     ctx.updateMsg(existing.id, { tool });
     ctx.syncToolPanel(tool, prevCallId);
     if ((name || existing.tool.name) === "write_file") {
-      ctx.setDetail({ type: "tool", tool });
+      revealWriteFileDetail(ctx.setDetail, tool);
     }
     return;
   }
@@ -123,7 +138,7 @@ export function upsertToolDelta(ev: RuntimeEvent, ctx: ToolUpsertCtx) {
   };
   ctx.appendMsg({ id: tool.id, role: "tool", content: "", tool });
   if (name === "write_file" || !name) {
-    ctx.setDetail({ type: "tool", tool });
+    revealWriteFileDetail(ctx.setDetail, tool);
   }
 }
 

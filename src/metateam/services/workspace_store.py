@@ -4,23 +4,43 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from ..core.config import ROOT, get_settings
+from ..core.config import REPO_ROOT, ROOT, get_settings
 from .tenant_context import DEFAULT_USER_ID, get_user_id, tenant_workspace_path
 
 MAX_RECENT = 12
 
 
+def _legacy_state_candidates(uid: str) -> list[Path]:
+    """Older layouts that may still hold a saved workspace path.
+
+    Only the default / pre-login context may read these global orphans so a
+    logged-in tenant never accidentally picks up another user's folder.
+    """
+    if uid != DEFAULT_USER_ID:
+        return []
+    return [
+        ROOT / "data" / "workspace.json",
+        REPO_ROOT / "backend" / "data" / "workspace.json",
+    ]
+
+
 def _state_path() -> Path:
+    """Preferred path for the current user's workspace.json (may not exist yet)."""
+    return tenant_workspace_path(get_user_id())
+
+
+def _resolve_state_file() -> Optional[Path]:
+    """Existing state file for the current user, including legacy fallbacks."""
     uid = get_user_id()
-    path = tenant_workspace_path(uid)
-    if path.exists():
-        return path
-    legacy = ROOT / "data" / "workspace.json"
-    if uid == DEFAULT_USER_ID and legacy.exists():
-        return legacy
-    return path
+    primary = tenant_workspace_path(uid)
+    if primary.exists():
+        return primary
+    for legacy in _legacy_state_candidates(uid):
+        if legacy.exists():
+            return legacy
+    return None
 
 
 # Back-compat
@@ -28,8 +48,8 @@ STATE_PATH = ROOT / "data" / "workspace.json"
 
 
 def _read_state() -> dict[str, Any]:
-    path = _state_path()
-    if not path.exists():
+    path = _resolve_state_file()
+    if not path:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -39,6 +59,7 @@ def _read_state() -> dict[str, Any]:
 
 
 def _write_state(path: Path, recent: list[str] | None = None) -> None:
+    # Always persist into the authenticated tenant bucket (not legacy globals).
     state_path = tenant_workspace_path(get_user_id())
     state_path.parent.mkdir(parents=True, exist_ok=True)
     prev = _read_state()
@@ -96,11 +117,19 @@ def list_workspaces() -> list[dict[str, Any]]:
 
 
 def get_active_workspace() -> dict[str, Any]:
-    configured = is_configured()
-    if not configured:
+    """Return the saved workspace for the current user (disk is source of truth)."""
+    # Keep live Settings in sync whenever an authenticated request asks.
+    apply_saved_workspace()
+    data = _read_state()
+    raw = str(data.get("path") or "").strip()
+    if not raw:
         return {"path": "", "name": "", "configured": False}
-    s = get_settings()
-    path = Path(s.workspace).resolve()
+    try:
+        path = Path(raw).expanduser().resolve()
+        if not path.is_dir():
+            return {"path": "", "name": "", "configured": False}
+    except Exception:
+        return {"path": "", "name": "", "configured": False}
     return {"path": str(path), "name": path.name or str(path), "configured": True}
 
 
@@ -139,14 +168,38 @@ def create_workspace(path: str) -> dict[str, Any]:
     return set_workspace(path, create=True)
 
 
-def apply_saved_workspace() -> None:
+def apply_saved_workspace() -> bool:
+    """Load the current user's saved workspace into Settings.
+
+    Returns True when ``settings.workspace`` changed. Safe to call after
+    ``set_user`` on each request — startup has no tenant context, so the
+    real path must be re-applied once the user is known.
+    """
     data = _read_state()
     raw = str(data.get("path") or "").strip()
     if not raw:
-        return
+        return False
     try:
         path = Path(raw).expanduser().resolve()
-        if path.is_dir():
-            get_settings().workspace = path
+        if not path.is_dir():
+            return False
     except Exception:
-        pass
+        return False
+
+    s = get_settings()
+    try:
+        current = Path(s.workspace).expanduser().resolve()
+    except Exception:
+        current = None
+    if current == path:
+        return False
+
+    s.workspace = path
+    # If we loaded from a legacy global file, copy into the tenant bucket once.
+    tenant_path = tenant_workspace_path(get_user_id())
+    if not tenant_path.exists():
+        try:
+            _write_state(path, recent=list(data.get("recent") or []))
+        except Exception:
+            pass
+    return True

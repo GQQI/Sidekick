@@ -1,7 +1,8 @@
 /** Pure helpers extracted from App to keep the shell leaner. */
 
-import { fileRawUrl, withAuthToken, type FilePayload } from "../api";
-import type { ChatMsg, DetailView, MsgAttachment } from "../types/chat";
+import { fileRawUrl, withAuthToken, type FilePayload, type SessionDetailMessage } from "../api";
+import type { ChatMsg, DetailView, MsgAttachment, ToolCard } from "../types/chat";
+import { formatToolSummary } from "./toolSummary";
 
 export type GreetingKey =
   | "greetingLateNight"
@@ -22,7 +23,11 @@ export function greetingKey(now = new Date()): GreetingKey {
 
 export function isSkillInjectMessage(content: string) {
   const text = (content || "").trim();
-  return text.includes("【Skill 已注入】") || text.includes("----- SKILL START -----");
+  return (
+    text.includes("【Skill 已注入】") ||
+    text.includes("----- SKILL START -----") ||
+    text.startsWith("请立即调用函数工具")
+  );
 }
 
 /** Hide Sidekick-internal user turns from the chat UI / history titles. */
@@ -208,29 +213,78 @@ export function parseUserAttachments(content: string): {
 }
 
 /** Map persisted session messages → UI chat bubbles (hides internal turns). */
-export function mapSessionMessages(
-  messages: Array<{ role?: string; content?: string }>,
-): ChatMsg[] {
-  return messages
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .filter((m) => {
-      if (m.role === "user" && isHiddenUserContent(m.content || "")) return false;
-      return true;
-    })
-    .map((m) => {
-      if (m.role === "user") {
-        const parsed = parseUserAttachments(m.content || "");
-        return {
-          id: uid(),
-          role: "user" as const,
-          content: parsed.text,
-          attachments: parsed.attachments.length ? parsed.attachments : undefined,
-        };
-      }
-      return {
+/** Soften skill tool-call prompts when restoring history without display text. */
+export function normalizeRestoredUserContent(content: string): string {
+  const text = (content || "").trim();
+  if (!text.startsWith("请立即调用函数工具")) return text;
+  const tool = text.match(/`(skill_[A-Za-z0-9_]+)`/)?.[1];
+  const taskMatch = text.match(/task 参数为：(.+?)(?:。|$)/);
+  const task = (taskMatch?.[1] || "").trim();
+  if (task && !task.includes("可省略 task")) {
+    const name = (tool || "skill").replace(/^skill_/, "").replace(/_/g, "-");
+    return `/skill ${name} ${task}`;
+  }
+  if (tool) {
+    return `/skill ${tool.replace(/^skill_/, "").replace(/_/g, "-")}`;
+  }
+  return text;
+}
+
+export function mapSessionMessages(messages: SessionDetailMessage[]): ChatMsg[] {
+  const out: ChatMsg[] = [];
+  for (const m of messages || []) {
+    if (m.role === "user") {
+      if (isHiddenUserContent(m.content || "")) continue;
+      const parsed = parseUserAttachments(
+        normalizeRestoredUserContent(m.content || ""),
+      );
+      out.push({
         id: uid(),
-        role: "assistant" as const,
-        content: m.content || "",
+        role: "user",
+        content: parsed.text,
+        attachments: parsed.attachments.length ? parsed.attachments : undefined,
+      });
+      continue;
+    }
+    if (m.role === "assistant") {
+      const content = (m.content || "").trim();
+      if (!content && !m.reasoning) continue;
+      out.push({
+        id: uid(),
+        role: "assistant",
+        content,
+        reasoning: m.reasoning || undefined,
+      });
+      continue;
+    }
+    if (m.role === "tool") {
+      const name = m.name || "tool";
+      const callId = m.call_id || uid();
+      const statusRaw = (m.status || "done").toLowerCase();
+      const status: ToolCard["status"] =
+        statusRaw === "error"
+          ? "error"
+          : statusRaw === "pending"
+            ? "pending"
+            : statusRaw === "running" || statusRaw === "streaming"
+              ? "done"
+              : "done";
+      const tool: ToolCard = {
+        id: uid(),
+        callId,
+        name,
+        args: m.args ?? {},
+        result: m.result || "",
+        status,
+        summary: formatToolSummary(name, m.args ?? {}),
       };
-    });
+      out.push({
+        id: tool.id,
+        role: "tool",
+        content: "",
+        tool,
+      });
+    }
+  }
+  return out;
 }

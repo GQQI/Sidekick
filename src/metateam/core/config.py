@@ -82,7 +82,8 @@ class Settings:
     sessions_dir: Path = field(default_factory=lambda: ROOT / "sessions")
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
 
-    allow_shell: bool = field(default_factory=lambda: _bool("META_ALLOW_SHELL", False))
+    # On by default for local desktop use; mutating shell still requires approval.
+    allow_shell: bool = field(default_factory=lambda: _bool("META_ALLOW_SHELL", True))
     # Path-allowlist sandbox for shell/verify (host cwd=workspace; not a copy FS)
     shell_sandbox: bool = field(default_factory=lambda: _bool("META_SHELL_SANDBOX", True))
     shell_timeout: int = int(os.getenv("META_SHELL_TIMEOUT", "90"))

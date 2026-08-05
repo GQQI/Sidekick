@@ -627,6 +627,10 @@ async function sendChat(
   const runMode = opts?.mode ?? chatMode;
 
   try {
+    const displayForApi =
+      opts?.userDisplay !== undefined && opts.userDisplay !== msg
+        ? opts.userDisplay
+        : undefined;
     const sid = await streamChat(
       msg,
       sessionId,
@@ -692,6 +696,7 @@ async function sendChat(
       },
       ac.signal,
       runMode,
+      displayForApi,
     );
     if (sid) setSessionId(sid);
   } catch (e) {

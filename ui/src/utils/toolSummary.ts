@@ -59,6 +59,11 @@ export function formatToolSummary(name: string, args: unknown, fallback = ""): s
   if (name === "memory_read") return "读取记忆";
   if (name === "delegate_task") return `委派: ${short(str("goal") || str("task"), 80)}`;
   if (name === "ask_user") return `询问用户: ${short(str("question"), 80)}`;
+  if (name === "browser_navigate") return `浏览器打开 ${short(str("url"), 80)}`;
+  if (name === "browser_screenshot") return "浏览器截图";
+  if (name === "browser_console") return "浏览器 console";
+  if (name === "browser_click") return `浏览器点击 ${short(str("selector"), 60)}`;
+  if (name === "browser_type") return `浏览器输入 ${short(str("selector"), 40)}`;
   if (name.startsWith("skill_")) return `调用技能 ${name}`;
   for (const key of ["path", "command", "query", "name", "goal", "note", "question"]) {
     if (str(key)) return `${name}: ${short(str(key), 80)}`;

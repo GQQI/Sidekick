@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import platform
 from pathlib import Path
 
 from ..services.memory import format_memory_block
@@ -15,6 +17,12 @@ All capabilities are OpenAI function tools. Call them with JSON arguments.
 - run_shell: for one-shot commands only. Dev servers (npm run dev, vite, uvicorn
   --reload, etc.) auto-run in background and return pid + early logs — never wait
   for them to exit; set background=true if unsure.
+- Scaffold CLIs (npm create vue@latest / create-vite / create-next-app / vue create)
+  are NOT interactive here — there is no TTY for arrow-key menus. Always use
+  non-interactive flags, e.g. `npm create vue@latest my-app -- --default` or
+  `npm create vite@latest my-app -- --template vue`. If the user must choose
+  TypeScript/Router/etc., call ask_user first, then pass the chosen flags.
+  Do not run bare `npm create vue@latest` and wait for prompts.
 - skill_* tools: each installed skill is a callable function. Call the matching
   skill_* tool when its description fits; follow the returned procedure.
 - delegate_task: fan out isolated subagents for heavy/parallel work.
@@ -90,6 +98,36 @@ You MAY call delegate_task to fan out, then synthesize. Prefer 2–3 focused lea
 """
 
 
+def _host_environment_block() -> str:
+    """Tell the model which OS/shell dialect to use for run_shell commands."""
+    system = platform.system()
+    if os.name == "nt":
+        return (
+            "## Host environment (CRITICAL)\n"
+            f"OS: {system} (Windows). Shell executor: PowerShell "
+            "(`powershell.exe -NoProfile -NonInteractive`).\n"
+            "- Write PowerShell-compatible commands — do NOT assume bash/zsh.\n"
+            "- Commands already run inside PowerShell — pass the script body directly "
+            "(e.g. `Test-Path .\\file.html`). Do NOT wrap with `powershell -Command ...`.\n"
+            "- Create dirs: `New-Item -ItemType Directory -Force -Path path` or `mkdir path` "
+            "(no bash `mkdir -p`).\n"
+            "- Download/HTTP: `curl.exe ...` or `Invoke-WebRequest` / `iwr` "
+            "(prefer `curl.exe` when you need curl flags).\n"
+            "- Open a local HTML file in the default browser: "
+            "`Start-Process .\\file.html` (not bash `open` / `xdg-open`).\n"
+            "- Chain with `;` or separate tool calls — avoid bash `&&` / `|` pipelines "
+            "that rely on Unix tools.\n"
+            "- Paths: prefer forward slashes or escaped backslashes; workspace is the cwd.\n"
+            "- If run_shell/verify_run returns shell-disabled, tell the user to set "
+            "META_ALLOW_SHELL=1 and restart — do NOT invent OS-specific unavailability."
+        )
+    return (
+        "## Host environment (CRITICAL)\n"
+        f"OS: {system}. Shell executor: `/bin/bash -lc`.\n"
+        "- Prefer portable POSIX commands (`mkdir -p`, `curl`, etc.)."
+    )
+
+
 def build_system_prompt(
     *,
     workspace: Path,
@@ -114,6 +152,7 @@ def build_system_prompt(
     else:
         parts.append(CORE)
 
+    parts.append(_host_environment_block())
     parts.append(f"WORKSPACE: {workspace.resolve()}")
 
     # Compact list of skill function names (schemas carry full descriptions)

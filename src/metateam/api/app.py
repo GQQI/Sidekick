@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -47,6 +49,7 @@ from ..services.skills import load_skills
 from ..services.store import STORE
 from ..runtime.tools import skill_tool_name
 from ..services.workspace_store import (
+    apply_saved_workspace,
     create_workspace,
     get_active_workspace,
     is_configured,
@@ -106,6 +109,12 @@ class LocalAuthMiddleware(BaseHTTPMiddleware):
             set_user(uid, uname)
             request.state.user_id = uid
             request.state.username = uname
+            # Startup applied workspace with no tenant context — rebind now.
+            if apply_saved_workspace():
+                try:
+                    STORE.refresh_settings()
+                except Exception:
+                    pass
         elif path.startswith("/api/") and public:
             # Optional token on public routes (e.g. status while logged in)
             token = request.headers.get(TOKEN_HEADER) or request.headers.get("X-Sidekick-Token")
@@ -115,6 +124,11 @@ class LocalAuthMiddleware(BaseHTTPMiddleware):
                 set_user(uid, uname)
                 request.state.user_id = uid
                 request.state.username = uname
+                if apply_saved_workspace():
+                    try:
+                        STORE.refresh_settings()
+                    except Exception:
+                        pass
 
         try:
             return await call_next(request)
@@ -135,6 +149,8 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     session_id: Optional[str] = None
     mode: str = "agent"  # "plan" | "agent"
+    # Optional UI-facing text (e.g. "/skill name task") while `message` is the model prompt.
+    display: Optional[str] = None
 
 
 class MemoryUpdate(BaseModel):
@@ -202,14 +218,15 @@ class FileMove(BaseModel):
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     s = get_settings()
-    configured = is_configured()
+    active = get_active_workspace()
+    configured = bool(active.get("configured"))
     return {
         "ok": True,
         "demo": s.demo_mode,
         "model": s.model,
         "base_url": s.base_url,
         "provider": getattr(s, "provider", ""),
-        "workspace": str(s.workspace) if configured else "",
+        "workspace": str(active.get("path") or ""),
         "workspace_configured": configured,
         "thinking_enabled": getattr(s, "thinking_enabled", False),
         "reasoning_effort": getattr(s, "reasoning_effort", ""),
@@ -799,10 +816,17 @@ async def chat_sse(req: ChatRequest) -> EventSourceResponse:
     if sess is None:
         sess = STORE.create()
 
-    from ..services.store import _summarize_title, is_untitled_session
+    from ..services.store import (
+        _summarize_title,
+        generate_session_title,
+        is_untitled_session,
+    )
 
-    title_candidate = _summarize_title(req.message)
-    if title_candidate and (len(sess.title) < 4 or is_untitled_session(sess.title)):
+    display = (req.display or "").strip()
+    title_src = display or req.message
+    title_candidate = _summarize_title(title_src)
+    needs_llm_title = is_untitled_session(sess.title) or len(sess.title) < 4
+    if title_candidate and needs_llm_title:
         sess.title = title_candidate
 
     q: queue.Queue[Optional[dict[str, Any]]] = queue.Queue()
@@ -823,11 +847,38 @@ async def chat_sse(req: ChatRequest) -> EventSourceResponse:
                     "parent_id": "",
                 }
             )
-            sess.updated_at = __import__("time").time()
-            result = sess.agent.run(req.message, mode=req.mode or "agent")
-            sess.updated_at = __import__("time").time()
+            if needs_llm_title:
+                try:
+                    llm_title = generate_session_title(
+                        sess.agent.llm,
+                        req.message,
+                        display=display,
+                    )
+                    if llm_title:
+                        sess.title = llm_title
+                except Exception as exc:
+                    from ..core.logutil import get_logger, log_exception
+
+                    log_exception(
+                        get_logger("metateam.api"),
+                        f"session title LLM failed for {sess.id}",
+                        exc,
+                    )
+            sess.updated_at = time.time()
+            result = sess.agent.run(
+                req.message,
+                mode=req.mode or "agent",
+                display=display,
+            )
+            sess.updated_at = time.time()
             try:
-                STORE.persist(sess.id)
+                path = STORE.persist(sess.id)
+                if not path:
+                    from ..core.logutil import get_logger
+
+                    get_logger("metateam.api").error(
+                        "persist returned None for session %s", sess.id
+                    )
             except Exception as exc:
                 from ..core.logutil import get_logger, log_exception
 
@@ -842,6 +893,7 @@ async def chat_sse(req: ChatRequest) -> EventSourceResponse:
                         "review": result.review,
                         "session_id": sess.id,
                         "cancelled": result.cancelled,
+                        "title": sess.title,
                     },
                     "ts": 0,
                     "agent_id": sess.agent.agent_id,
@@ -849,6 +901,11 @@ async def chat_sse(req: ChatRequest) -> EventSourceResponse:
                 }
             )
         except Exception as exc:  # noqa: BLE001
+            # Still try to keep whatever transcript we have.
+            try:
+                STORE.persist(sess.id)
+            except Exception:
+                pass
             q.put(
                 {
                     "type": "error",
@@ -862,7 +919,9 @@ async def chat_sse(req: ChatRequest) -> EventSourceResponse:
             unsub()
             q.put(None)
 
-    threading.Thread(target=worker, daemon=True).start()
+    # Preserve request tenant ContextVar inside the SSE worker thread.
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(worker,), daemon=True).start()
 
     async def gen() -> AsyncIterator[dict[str, str]]:
         try:
@@ -882,6 +941,101 @@ async def chat_sse(req: ChatRequest) -> EventSourceResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+class BrowserStartBody(BaseModel):
+    url: str = ""
+    headless: bool = False
+
+
+class BrowserNavigateBody(BaseModel):
+    url: str
+
+
+class BrowserPickBody(BaseModel):
+    timeout_ms: int = 60000
+    with_screenshot: bool = True
+
+
+@app.get("/api/browser/status")
+def api_browser_status() -> dict[str, Any]:
+    from ..services.browser_sandbox import SANDBOX
+
+    return SANDBOX.status()
+
+
+@app.post("/api/browser/session")
+def api_browser_session(body: BrowserStartBody) -> dict[str, Any]:
+    from ..services.browser_sandbox import SANDBOX
+
+    try:
+        return SANDBOX.ensure_session(url=body.url, headless=bool(body.headless))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/browser/session")
+def api_browser_session_close() -> dict[str, str]:
+    from ..services.browser_sandbox import SANDBOX
+
+    SANDBOX.close()
+    return {"status": "ok"}
+
+
+@app.post("/api/browser/navigate")
+def api_browser_navigate(body: BrowserNavigateBody) -> dict[str, Any]:
+    from ..services.browser_sandbox import SANDBOX
+
+    try:
+        return SANDBOX.navigate(body.url)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/browser/screenshot")
+def api_browser_screenshot(full_page: bool = False):
+    from fastapi.responses import Response
+
+    from ..services.browser_sandbox import SANDBOX
+
+    try:
+        png = SANDBOX.screenshot_png(full_page=bool(full_page))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+    return Response(content=png, media_type="image/png")
+
+
+@app.get("/api/browser/console")
+def api_browser_console(limit: int = 80) -> dict[str, Any]:
+    from ..services.browser_sandbox import SANDBOX
+
+    logs = SANDBOX.console_logs(limit=limit)
+    return {"count": len(logs), "logs": logs}
+
+
+@app.post("/api/browser/select")
+def api_browser_select(body: BrowserPickBody) -> dict[str, Any]:
+    """Arm Select Mode in the CDP window; blocks until click or timeout."""
+    from ..services.browser_sandbox import SANDBOX
+
+    try:
+        payload = SANDBOX.pick_element(
+            timeout_ms=int(body.timeout_ms),
+            with_screenshot=bool(body.with_screenshot),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+    if payload is None:
+        return {"ok": False, "element": None, "message": "cancelled or timed out"}
+    return {"ok": True, "element": payload.model_dump()}
+
+
+@app.post("/api/browser/select/cancel")
+def api_browser_select_cancel() -> dict[str, str]:
+    from ..services.browser_sandbox import SANDBOX
+
+    SANDBOX.cancel_pick()
+    return {"status": "ok"}
 
 
 @app.get("/api/skills")
