@@ -7,29 +7,46 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import ROOT, get_settings
+from .tenant_context import DEFAULT_USER_ID, get_user_id, tenant_workspace_path
 
-STATE_PATH = ROOT / "data" / "workspace.json"
 MAX_RECENT = 12
 
 
+def _state_path() -> Path:
+    uid = get_user_id()
+    path = tenant_workspace_path(uid)
+    if path.exists():
+        return path
+    legacy = ROOT / "data" / "workspace.json"
+    if uid == DEFAULT_USER_ID and legacy.exists():
+        return legacy
+    return path
+
+
+# Back-compat
+STATE_PATH = ROOT / "data" / "workspace.json"
+
+
 def _read_state() -> dict[str, Any]:
-    if not STATE_PATH.exists():
+    path = _state_path()
+    if not path.exists():
         return {}
     try:
-        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
 def _write_state(path: Path, recent: list[str] | None = None) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    state_path = tenant_workspace_path(get_user_id())
+    state_path.parent.mkdir(parents=True, exist_ok=True)
     prev = _read_state()
     items = recent if recent is not None else list(prev.get("recent") or [])
     resolved = str(path.resolve())
     items = [resolved, *[p for p in items if p != resolved]]
     items = items[:MAX_RECENT]
-    STATE_PATH.write_text(
+    state_path.write_text(
         json.dumps({"path": resolved, "recent": items}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

@@ -1,6 +1,6 @@
 /** Pure helpers extracted from App to keep the shell leaner. */
 
-import type { FilePayload } from "../api";
+import { fileRawUrl, withAuthToken, type FilePayload } from "../api";
 import type { ChatMsg, DetailView, MsgAttachment } from "../types/chat";
 
 export type GreetingKey =
@@ -161,7 +161,8 @@ export function fileToDetail(
     preview: file.preview || "",
     editable: Boolean(file.editable ?? kind === "text"),
     message: file.message || (kind === "unsupported" ? "暂不支持预览此文件" : ""),
-    rawUrl: file.raw_url,
+    // Prefer path-based URL so the current local token is always attached
+    rawUrl: withAuthToken(file.raw_url) || fileRawUrl(file.path),
     highlightQuery: opts?.highlightQuery,
     focusLine: opts?.focusLine,
     forceEdit: false,

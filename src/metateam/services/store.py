@@ -10,7 +10,10 @@ from typing import Any, Optional
 from ..runtime.agent import Agent
 from ..core.config import Settings, get_settings, reload_settings
 from ..core.events import EventBus, new_id
+from ..core.logutil import get_logger, log_exception
 from .session import load_session, save_session, sessions_dir
+
+_log = get_logger("metateam.store")
 
 @dataclass
 class ChatSession:
@@ -19,6 +22,7 @@ class ChatSession:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     title: str = "New chat"
+    user_id: str = ""
 
 
 _UNTITLED_TITLES = frozenset({"新会话", "New chat", "Untitled", ""})
@@ -93,20 +97,27 @@ class SessionStore:
                 # Rebuild clients so demo→API (or model/base_url changes) take effect
                 sess.agent.llm = LLM(sess.agent.settings)
                 sess.agent.compress_llm = LLM(
-                    sess.agent.settings, model=sess.agent.settings.compress_model
+                    sess.agent.settings,
+                    model=sess.agent.settings.compress_model,
+                    api_key=getattr(sess.agent.settings, "compress_api_key", None)
+                    or sess.agent.settings.api_key,
+                    base_url=getattr(sess.agent.settings, "compress_base_url", None)
+                    or sess.agent.settings.base_url,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_exception(_log, f"refresh_settings failed for session {sess.id}", exc)
         return self.settings
 
     def create(self) -> ChatSession:
         # Always use latest settings for new chats (model switch)
+        from .tenant_context import get_user_id
+
         self.settings = get_settings()
         bus = EventBus()
         from ..runtime.approval import ApprovalGate
 
         agent = Agent(self.settings, bus=bus, approval=ApprovalGate())
-        sess = ChatSession(id=new_id("sess"), agent=agent)
+        sess = ChatSession(id=new_id("sess"), agent=agent, user_id=get_user_id())
         agent.session_id = sess.id
         with self._lock:
             self._sessions[sess.id] = sess
@@ -151,9 +162,14 @@ class SessionStore:
         return sess.agent.plan_gate.decide(plan_id, approved)
 
     def get(self, session_id: str) -> Optional[ChatSession]:
+        from .tenant_context import get_user_id
+
+        uid = get_user_id()
         with self._lock:
             hit = self._sessions.get(session_id)
         if hit:
+            if hit.user_id and hit.user_id != uid:
+                return None
             return hit
         return self._restore_from_disk(session_id)
 
@@ -164,13 +180,41 @@ class SessionStore:
         sess.agent.request_cancel()
         return True
 
+    def _session_paths_for_user(self) -> list[Any]:
+        from pathlib import Path
+
+        from .session import legacy_sessions_dir
+        from .tenant_context import DEFAULT_USER_ID, get_user_id
+
+        uid = get_user_id()
+        paths: list[Any] = list(sessions_dir(self.settings.root, uid).glob("*.json"))
+        # Pre-setup / default: also surface legacy flat sessions once
+        if uid == DEFAULT_USER_ID:
+            for path in legacy_sessions_dir(self.settings.root).glob("sess_*.json"):
+                paths.append(path)
+        return paths
+
     def _restore_from_disk(self, session_id: str) -> Optional[ChatSession]:
-        path = sessions_dir(self.settings.root) / f"{session_id}.json"
-        if not path.exists():
+        from .tenant_context import get_user_id
+
+        uid = get_user_id()
+        candidates = [
+            sessions_dir(self.settings.root, uid) / f"{session_id}.json",
+        ]
+        from .session import legacy_sessions_dir
+        from .tenant_context import DEFAULT_USER_ID
+
+        if uid == DEFAULT_USER_ID:
+            candidates.append(legacy_sessions_dir(self.settings.root) / f"{session_id}.json")
+
+        path = next((p for p in candidates if p.exists()), None)
+        if not path:
             return None
         try:
             meta, messages = load_session(path)
         except Exception:
+            return None
+        if meta.user_id and meta.user_id != uid:
             return None
         self.settings = get_settings()
         bus = EventBus()
@@ -182,6 +226,7 @@ class SessionStore:
             created_at=mtime,
             updated_at=mtime,
             title=_title_from_messages(messages, meta.id),
+            user_id=meta.user_id or uid,
         )
         agent.session_id = sess.id
         with self._lock:
@@ -189,13 +234,17 @@ class SessionStore:
         return sess
 
     def list(self, *, page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        from .tenant_context import get_user_id
+
+        uid = get_user_id()
         items: dict[str, dict[str, Any]] = {}
 
         # Disk history first
-        root = self.settings.root
-        for path in sessions_dir(root).glob("*.json"):
+        for path in self._session_paths_for_user():
             try:
                 meta, messages = load_session(path)
+                if meta.user_id and meta.user_id != uid:
+                    continue
                 sid = meta.id or path.stem
                 user_count = sum(
                     1
@@ -240,6 +289,8 @@ class SessionStore:
         with self._lock:
             live = list(self._sessions.values())
         for s in live:
+            if s.user_id and s.user_id != uid:
+                continue
             prev = items.get(s.id)
             # Prefer the freshest interaction time (memory vs disk)
             updated = s.updated_at
@@ -282,8 +333,13 @@ class SessionStore:
         }
 
     def delete(self, session_id: str) -> bool:
+        from .tenant_context import get_user_id
+
         removed = False
         with self._lock:
+            hit = self._sessions.get(session_id)
+            if hit and hit.user_id and hit.user_id != get_user_id():
+                return False
             if session_id in self._sessions:
                 del self._sessions[session_id]
                 removed = True
@@ -316,8 +372,8 @@ class SessionStore:
         sess.updated_at = time.time()
         try:
             self.persist(session_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_exception(_log, f"persist after truncate failed for {session_id}", exc)
         return True
 
     def persist(self, session_id: str) -> Optional[str]:
@@ -330,6 +386,7 @@ class SessionStore:
             model=self.settings.model,
             workspace=self.settings.workspace,
             session_id=session_id,
+            user_id=sess.user_id or None,
         )
         return str(path)
 

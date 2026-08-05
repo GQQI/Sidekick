@@ -43,17 +43,67 @@ def _is_long_running_command(command: str) -> bool:
     return bool(_LONG_RUNNING_RE.search(command))
 
 
-def _run_shell_background(command: str, *, cwd: str, collect_secs: float = 8.0) -> str:
+_DANGEROUS_SHELL_RE = re.compile(
+    r"("
+    r"rm\s+-rf\s+/|"
+    r"rm\s+-rf\s+~|"
+    r"format\s+c:|"
+    r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;|"
+    r"del\s+/s\s+/q\s+c:|"
+    r"rd\s+/s\s+/q\s+c:|"
+    r"remove-item\s+.*-recurse|"
+    r"mkfs\.|"
+    r"dd\s+if=.*of=/dev/|"
+    r">\s*/dev/sd|"
+    r"\bshutdown\b|"
+    r"\breboot\b"
+    r")",
+    re.I,
+)
+
+
+def _shell_argv(command: str) -> list[str]:
+    """Run via explicit shell binary — avoids Python shell=True string risks."""
+    if os.name == "nt":
+        return ["cmd.exe", "/d", "/c", command]
+    return ["/bin/bash", "-lc", command]
+
+
+def _shell_policy(settings: Settings, workspace: Path):
+    from ..services.shell_sandbox import ShellSandboxPolicy
+
+    return ShellSandboxPolicy.for_workspace(
+        workspace,
+        enabled=bool(getattr(settings, "shell_sandbox", True)),
+    )
+
+
+def _guard_shell(command: str, *, settings: Settings, workspace: Path) -> Optional[str]:
+    from ..services.shell_sandbox import check_command
+
+    return check_command(
+        command,
+        cwd=workspace,
+        policy=_shell_policy(settings, workspace),
+    )
+
+
+def _sandboxed_env(settings: Settings) -> dict[str, str]:
+    from ..services.shell_sandbox import sandbox_env
+
+    return sandbox_env()
+
+
+def _run_shell_background(command: str, *, cwd: str, collect_secs: float = 8.0, env: Optional[dict[str, str]] = None) -> str:
     """Start a process and return after collecting early logs (does not wait for exit)."""
     popen_kwargs: dict[str, Any] = {
-        "shell": True,
         "cwd": cwd,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
         "text": True,
         "encoding": "utf-8",
         "errors": "replace",
-        "env": {**os.environ, "PYTHONIOENCODING": "utf-8"},
+        "env": env or {**os.environ, "PYTHONIOENCODING": "utf-8"},
     }
     if os.name == "nt":
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -61,7 +111,7 @@ def _run_shell_background(command: str, *, cwd: str, collect_secs: float = 8.0) 
         # Detach from parent session so Ctrl+C on the server doesn't kill child servers
         popen_kwargs["start_new_session"] = True
 
-    proc = subprocess.Popen(command, **popen_kwargs)
+    proc = subprocess.Popen(_shell_argv(command), **popen_kwargs)
     chunks: list[str] = []
     done = threading.Event()
 
@@ -211,6 +261,15 @@ def save_skill_file(settings: Settings, name: str, description: str, content: st
 _save_skill_file = save_skill_file
 
 
+def _looks_like_code_path(path: str) -> bool:
+    suffix = Path(path).suffix.lower()
+    if not suffix:
+        return False
+    from ..services.codebase_memory import CODE_SUFFIXES
+
+    return suffix in CODE_SUFFIXES
+
+
 def build_registry(
     settings: Settings,
     *,
@@ -221,6 +280,8 @@ def build_registry(
 ) -> ToolRegistry:
     reg = ToolRegistry()
     ws = settings.workspace
+    # Codebase-as-Memory: new code files require a prior similarity align in this run.
+    align_state: dict[str, Any] = {"aligned": False, "queries": []}
 
     def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
         fp = _safe_path(ws, path)
@@ -235,8 +296,9 @@ def build_registry(
             body += f"\n… next_offset={offset + limit} total_lines={len(lines)}"
         return body
 
-    def write_file(path: str, content: str) -> str:
+    def write_file(path: str, content: str, force_create: bool = False) -> str:
         from ..services import fs_api
+        from ..services import codebase_memory as cbm
 
         try:
             # Relative to workspace for undo + consistent path rules
@@ -246,13 +308,30 @@ def build_registry(
                     rel = str(Path(path).resolve().relative_to(ws.resolve())).replace("\\", "/")
             except Exception:
                 rel = path.replace("\\", "/")
+
+            target = _safe_path(ws, rel)
+            is_new = not target.exists()
+            if (
+                is_new
+                and _looks_like_code_path(rel)
+                and not bool(force_create)
+                and not align_state["aligned"]
+            ):
+                return (
+                    "ERROR: codebase_align_required — before creating a new code file, "
+                    "call codebase_find_similar with what you intend to build. "
+                    "If no reusable asset exists, retry write_file with force_create=true."
+                )
+
             res = fs_api.write_text(rel, content)
+            cbm.invalidate_index(ws)
             return f"wrote {res['path']} ({res['size']} chars)"
         except Exception as exc:
             return f"ERROR: {exc}"
 
     def delete_file(path: str) -> str:
         from ..services import fs_api
+        from ..services import codebase_memory as cbm
 
         try:
             rel = path.replace("\\", "/")
@@ -262,9 +341,129 @@ def build_registry(
             except Exception:
                 pass
             res = fs_api.delete_entry(rel, recursive=False)
+            cbm.invalidate_index(ws)
             return f"deleted {res['path']}"
         except Exception as exc:
             return f"ERROR: {exc}"
+
+    def codebase_overview(refresh: bool = False) -> str:
+        from ..services import codebase_memory as cbm
+
+        index = cbm.get_or_build_index(ws, force=bool(refresh))
+        ov = cbm.overview(index)
+        return json.dumps(ov, ensure_ascii=False, indent=2)
+
+    def codebase_find_similar(query: str, limit: int = 12) -> str:
+        from ..services import codebase_memory as cbm
+
+        q = (query or "").strip()
+        if not q:
+            return "ERROR: empty query"
+        index = cbm.get_or_build_index(ws)
+        hits = cbm.find_similar(index, q, limit=max(1, min(int(limit), 30)))
+        align_state["aligned"] = True
+        align_state["queries"].append(q)
+        payload = {
+            "query": q,
+            "aligned": True,
+            "match_count": len(hits),
+            "matches": hits,
+            "guidance": (
+                "If matches exist, prefer extending/reusing them over creating a parallel file. "
+                "If match_count is 0, you may write_file with force_create=true."
+            ),
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def codebase_impact(symbol_or_path: str, limit: int = 40) -> str:
+        from ..services import codebase_memory as cbm
+
+        needle = (symbol_or_path or "").strip()
+        if not needle:
+            return "ERROR: empty symbol_or_path"
+        index = cbm.get_or_build_index(ws)
+        refs = cbm.find_references(ws, index, needle, limit=max(1, min(int(limit), 80)))
+        payload = {
+            "target": needle,
+            "reference_files": len(refs),
+            "hits": refs,
+            "guidance": "Treat listed files as blast radius; avoid breaking callers.",
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def coherence_checklist() -> str:
+        from .coherence import PILE_CHECKLIST
+
+        return (
+            PILE_CHECKLIST
+            + "\n\nReply against each item with evidence (paths). "
+            "If any fail, fix by extending existing assets before you stop."
+        )
+
+    def git_status() -> str:
+        from ..services import git_ops
+
+        return git_ops.git_status(ws)
+
+    def git_diff(staged: bool = False, path: str = "") -> str:
+        from ..services import git_ops
+
+        return git_ops.git_diff(ws, staged=bool(staged), path=(path or "").strip())
+
+    def git_log(limit: int = 12) -> str:
+        from ..services import git_ops
+
+        return git_ops.git_log(ws, limit=limit)
+
+    def git_branch() -> str:
+        from ..services import git_ops
+
+        return git_ops.git_branch(ws)
+
+    def git_commit(message: str) -> str:
+        from ..services import git_ops
+
+        return git_ops.git_commit(ws, message)
+
+    def verify_run(command: str, timeout_sec: int = 120) -> str:
+        """Run a verification command (tests/lint). Requires approval; needs shell enabled."""
+        if not settings.allow_shell:
+            return (
+                "ERROR: shell disabled (META_ALLOW_SHELL=0). "
+                "Enable shell to run verify_run, or tell the user the verify command to run locally."
+            )
+        cmd = (command or "").strip()
+        if not cmd:
+            return "ERROR: empty command"
+        if _DANGEROUS_SHELL_RE.search(cmd):
+            return "ERROR: command blocked by safety denylist"
+        blocked = _guard_shell(cmd, settings=settings, workspace=ws)
+        if blocked:
+            return blocked
+        if _is_long_running_command(cmd):
+            return "ERROR: verify_run is for one-shot checks, not long-running servers"
+        timeout = max(15, min(int(timeout_sec or 120), 600))
+        try:
+            proc = subprocess.run(
+                _shell_argv(cmd),
+                cwd=str(ws.resolve()),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                shell=False,
+                env=_sandboxed_env(settings),
+            )
+        except subprocess.TimeoutExpired:
+            return f"VERIFY FAIL timeout={timeout}s command={cmd!r}"
+        except Exception as exc:  # noqa: BLE001
+            return f"VERIFY FAIL error={exc}"
+        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if len(out) > 12_000:
+            out = out[:12_000] + "\n…[truncated]"
+        status = "PASS" if proc.returncode == 0 else "FAIL"
+        return f"VERIFY {status} exit={proc.returncode}\ncommand={cmd!r}\n---\n{out or '(no output)'}"
 
     def list_dir(path: str = ".") -> str:
         fp = _safe_path(ws, path)
@@ -307,26 +506,30 @@ def build_registry(
 
     def run_shell(command: str, background: bool = False) -> str:
         if not settings.allow_shell:
-            return "ERROR: shell disabled"
-        bad = ("rm -rf /", "format c:", ":(){:|:&};:", "del /s /q c:")
+            return "ERROR: shell disabled (set META_ALLOW_SHELL=1 to enable)"
         low = command.lower().strip()
-        if any(b in low for b in bad):
+        if _DANGEROUS_SHELL_RE.search(low):
             return "ERROR: blocked dangerous command"
+        blocked = _guard_shell(command, settings=settings, workspace=ws)
+        if blocked:
+            return blocked
 
+        env = _sandboxed_env(settings)
         # Dev servers / watchers never exit — must not block the agent.
         long_running = background or _is_long_running_command(low)
         if long_running:
-            return _run_shell_background(command, cwd=str(ws), collect_secs=8.0)
+            return _run_shell_background(
+                command, cwd=str(ws.resolve()), collect_secs=8.0, env=env
+            )
 
         try:
             proc = subprocess.run(
-                command,
-                shell=True,
-                cwd=str(ws),
+                _shell_argv(command),
+                cwd=str(ws.resolve()),
                 capture_output=True,
                 text=True,
                 timeout=settings.shell_timeout,
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             partial = (exc.stdout or "") + (("\n" + (exc.stderr or "")) if exc.stderr else "")
@@ -386,12 +589,21 @@ def build_registry(
     reg.register(
         Tool(
             "write_file",
-            "Write/overwrite a text file under the workspace. Requires user approval.",
+            "Write/overwrite a text file under the workspace. Requires user approval. "
+            "Creating a NEW code file requires a prior codebase_find_similar call in this run "
+            "(or force_create=true after confirming nothing reusable exists).",
             {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
+                    "force_create": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true only after codebase_find_similar shows no reusable asset "
+                            "and you must create a new file."
+                        ),
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -442,6 +654,154 @@ def build_registry(
             },
             search_text,
             parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "codebase_overview",
+            "Summarize workspace structure from the codebase index (dirs, suffixes, sample symbols). "
+            "Use to understand what already exists before designing new work. "
+            "Pass refresh=true after large external file changes.",
+            {
+                "type": "object",
+                "properties": {
+                    "refresh": {
+                        "type": "boolean",
+                        "description": "Force rebuild the index from disk.",
+                    }
+                },
+                "required": [],
+            },
+            codebase_overview,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "codebase_find_similar",
+            "Find existing files/symbols similar to an intended capability. "
+            "REQUIRED before creating a new code file. Prefer reuse/extension when matches exist.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What you intend to build or change (capability, name, or path hint).",
+                    },
+                    "limit": {"type": "integer", "default": 12},
+                },
+                "required": ["query"],
+            },
+            codebase_find_similar,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "codebase_impact",
+            "Estimate blast radius: files that reference a symbol or path. "
+            "Call before editing shared modules.",
+            {
+                "type": "object",
+                "properties": {
+                    "symbol_or_path": {"type": "string"},
+                    "limit": {"type": "integer", "default": 40},
+                },
+                "required": ["symbol_or_path"],
+            },
+            codebase_impact,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "coherence_checklist",
+            "Return the Anti-Piling checklist (overlay / hardcode / control-flow / blast). "
+            "Call near the end of LARGE structural work; answer each item with file evidence.",
+            {"type": "object", "properties": {}, "required": []},
+            coherence_checklist,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "git_status",
+            "Show git status --short --branch for the workspace.",
+            {"type": "object", "properties": {}, "required": []},
+            git_status,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "git_diff",
+            "Show git diff (optionally staged, optionally one path).",
+            {
+                "type": "object",
+                "properties": {
+                    "staged": {"type": "boolean", "default": False},
+                    "path": {"type": "string", "description": "Optional path filter"},
+                },
+                "required": [],
+            },
+            git_diff,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "git_log",
+            "Show recent commits (oneline).",
+            {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "default": 12}},
+                "required": [],
+            },
+            git_log,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "git_branch",
+            "List local branches (-vv).",
+            {"type": "object", "properties": {}, "required": []},
+            git_branch,
+            parallel_safe=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "git_commit",
+            "Stage tracked changes (git add -u) and commit with a message. Requires approval. "
+            "Does not force-add untracked files.",
+            {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+            git_commit,
+            parallel_safe=False,
+            requires_approval=True,
+        )
+    )
+    reg.register(
+        Tool(
+            "verify_run",
+            "Run a one-shot verification command (tests/lint). Requires approval and META_ALLOW_SHELL=1. "
+            "Prefer this over open-ended shell for acceptance checks. "
+            "If shape_contract.verify_command is set, run that before claiming done.",
+            {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout_sec": {"type": "integer", "default": 120},
+                },
+                "required": ["command"],
+            },
+            verify_run,
+            parallel_safe=False,
+            requires_approval=True,
         )
     )
     if settings.allow_shell:
@@ -567,8 +927,9 @@ def build_registry(
         reg.register(
             Tool(
                 "ask_user",
-                "Ask the user to clarify BEFORE continuing — at ANY point in a task "
-                "(after reading files, running commands, partial progress, etc.). "
+                "Ask the user to clarify ONLY when a real decision or missing info blocks progress. "
+                "Do NOT use ask_user to summarize the conversation, list past user tasks, or answer "
+                "meta questions answerable from chat history — reply in normal assistant text instead. "
                 "The UI shows clickable buttons; NEVER print numbered/lettered option "
                 "lists in assistant text. Provide question + options (array of 2–12 "
                 "short labels). Set allow_custom=true so the user can type a custom "
@@ -692,6 +1053,16 @@ def build_registry(
                 parallel_safe=False,
             )
         )
+
+    if getattr(settings, "mcp_enabled", True):
+        try:
+            from ..services.mcp_runtime import register_mcp_tools
+
+            register_mcp_tools(reg, Tool=Tool)
+        except Exception as exc:  # noqa: BLE001
+            from ..core.logutil import get_logger, log_exception
+
+            log_exception(get_logger("metateam.tools"), "MCP tool registration failed", exc)
 
     return reg
 

@@ -80,6 +80,14 @@ Open **http://127.0.0.1:8787** → pick a workspace folder → Settings → Mode
 
 > Never commit real keys, `.env`, or chat history (see `.gitignore`).
 
+### Local security (defaults)
+
+- Binds `127.0.0.1` only; non-loopback bind requires `META_ALLOW_REMOTE=1` (unsafe).
+- API requires a local token (`X-Sidekick-Token`, stored in `src/data/.local_token`); the UI fetches it via `/api/bootstrap`.
+- API keys in `model.json` are encrypted at rest (`src/data/.secret_key`).
+- Shell tools are off by default (`META_ALLOW_SHELL=0`); when enabled they still go through the agent approval gate.
+- **Approval boundary:** ApprovalGate covers agent tool calls; UI file writes rely on the local token plus in-app confirm dialogs.
+
 ### UI (optional)
 
 ```powershell

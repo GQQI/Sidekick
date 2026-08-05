@@ -45,9 +45,142 @@ export type RuntimeEvent = {
 };
 
 const BASE = "";
+const TOKEN_KEY = "sidekick_local_token";
+let _token: string | null =
+  typeof localStorage !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+let _bootstrapPromise: Promise<string | null> | null = null;
+
+export type AuthStatus = {
+  needs_setup: boolean;
+  multi_user: boolean;
+  user_count: number;
+  auth_required?: boolean;
+  authenticated?: boolean;
+  user?: { id: string; username: string; email?: string } | null;
+  token?: string | null;
+  token_header?: string;
+};
+
+export function getStoredToken(): string | null {
+  return _token;
+}
+
+export function setApiToken(token: string | null) {
+  _token = token;
+  if (typeof localStorage === "undefined") return;
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
+export async function fetchAuthStatus(): Promise<AuthStatus> {
+  const headers = new Headers();
+  if (_token) headers.set("X-Sidekick-Token", _token);
+  const r = await fetch(`${BASE}/api/auth/status`, { headers });
+  if (!r.ok) throw new Error(`/api/auth/status failed: ${r.status}`);
+  return r.json() as Promise<AuthStatus>;
+}
+
+export async function authSetup(payload: {
+  username: string;
+  email: string;
+  password: string;
+}) {
+  const r = await fetch(`${BASE}/api/auth/setup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    let detail = `setup failed: ${r.status}`;
+    try {
+      const body = (await r.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const body = (await r.json()) as {
+    token?: string;
+    user?: { id: string; username: string; email?: string };
+  };
+  if (body.token) setApiToken(body.token);
+  return body;
+}
+
+export async function authLogin(payload: { email: string; password: string }) {
+  const r = await fetch(`${BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    let detail = `login failed: ${r.status}`;
+    try {
+      const body = (await r.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const body = (await r.json()) as {
+    token?: string;
+    user?: { id: string; username: string; email?: string };
+  };
+  if (body.token) setApiToken(body.token);
+  return body;
+}
+
+export async function authLogout() {
+  try {
+    const headers = new Headers();
+    if (_token) headers.set("X-Sidekick-Token", _token);
+    await fetch(`${BASE}/api/auth/logout`, { method: "POST", headers });
+  } catch {
+    /* ignore */
+  }
+  setApiToken(null);
+}
+
+export async function ensureApiToken(): Promise<string | null> {
+  if (_token) return _token;
+  if (_bootstrapPromise) return _bootstrapPromise;
+  _bootstrapPromise = (async () => {
+    try {
+      const r = await fetch(`${BASE}/api/bootstrap`);
+      if (!r.ok) return null;
+      const body = (await r.json()) as AuthStatus;
+      if (body.auth_required) {
+        // Multi-user: must login — do not invent a token
+        return null;
+      }
+      if (body.token) {
+        setApiToken(body.token);
+        return body.token;
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
+  })();
+  try {
+    return await _bootstrapPromise;
+  } finally {
+    _bootstrapPromise = null;
+  }
+}
+
+async function authHeaders(extra?: HeadersInit): Promise<Headers> {
+  const headers = new Headers(extra || {});
+  const token = await ensureApiToken();
+  if (token) headers.set("X-Sidekick-Token", token);
+  return headers;
+}
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(`${BASE}${url}`, init);
+  const headers = await authHeaders(init?.headers);
+  const r = await fetch(`${BASE}${url}`, { ...init, headers });
   if (!r.ok) {
     let detail = `${url} failed: ${r.status}`;
     try {
@@ -61,7 +194,13 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
   return r.json() as Promise<T>;
 }
 
-export const fetchHealth = () => json<Health>("/api/health");
+/** Public health check (no token required). */
+export const fetchHealth = async () => {
+  const r = await fetch(`${BASE}/api/health`);
+  if (!r.ok) throw new Error(`/api/health failed: ${r.status}`);
+  return r.json() as Promise<Health>;
+};
+
 export const createSession = () =>
   json<{ id: string; demo: boolean }>("/api/sessions", { method: "POST" });
 
@@ -278,7 +417,8 @@ export const searchFiles = (q: string, path = ".") =>
 export const uploadFile = async (file: File) => {
   const fd = new FormData();
   fd.append("file", file);
-  const r = await fetch(`${BASE}/api/files/upload`, { method: "POST", body: fd });
+  const headers = await authHeaders();
+  const r = await fetch(`${BASE}/api/files/upload`, { method: "POST", body: fd, headers });
   if (!r.ok) {
     const text = await r.text();
     throw new Error(text || `upload failed: ${r.status}`);
@@ -287,8 +427,28 @@ export const uploadFile = async (file: File) => {
 };
 export const readFileContent = (path: string) =>
   json<FilePayload>(`/api/files/content?path=${encodeURIComponent(path)}`);
-export const fileRawUrl = (path: string) =>
-  `/api/files/raw?path=${encodeURIComponent(path)}`;
+export const getApiToken = () => _token;
+
+/** Attach local token to /api/... URLs used by <img>/<iframe>/window.open (no custom headers). */
+export function withAuthToken(url: string | undefined | null): string | undefined {
+  if (!url) return undefined;
+  if (!url.startsWith("/api/")) return url;
+  const token = _token;
+  if (!token) return url;
+  try {
+    const u = new URL(url, "http://local.invalid");
+    if (!u.searchParams.has("token")) u.searchParams.set("token", token);
+    return `${u.pathname}${u.search}`;
+  } catch {
+    return url.includes("?") ? `${url}&token=${encodeURIComponent(token)}` : `${url}?token=${encodeURIComponent(token)}`;
+  }
+}
+
+export const fileRawUrl = (path: string) => {
+  const q = new URLSearchParams({ path });
+  if (_token) q.set("token", _token);
+  return `/api/files/raw?${q.toString()}`;
+};
 export const writeFileContent = (path: string, content: string) =>
   json<{ path: string; size: number }>("/api/files/content", {
     method: "PUT",
@@ -428,9 +588,13 @@ export async function streamChat(
 ): Promise<string | null> {
   let r: Response;
   try {
+    const headers = await authHeaders({
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    });
     r = await fetch(`${BASE}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers,
       body: JSON.stringify({ message, session_id: sessionId, mode }),
       signal,
     });
@@ -503,3 +667,41 @@ export async function streamChat(
   }
   return sid;
 }
+
+export type McpServer = {
+  id: string;
+  name: string;
+  transport?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  env_keys?: string[];
+  url?: string;
+  headers?: Record<string, string>;
+  header_keys?: string[];
+  enabled: boolean;
+};
+
+export type McpSetup = {
+  version: number;
+  servers: McpServer[];
+};
+
+export const fetchMcp = () => json<McpSetup>("/api/mcp");
+
+export const saveMcp = (setup: McpSetup) =>
+  json<McpSetup & { status?: string }>("/api/mcp", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(setup),
+  });
+
+export const testMcpServer = (server: McpServer) =>
+  json<{ ok: boolean; error?: string; tool_count?: number; tools?: unknown[] }>(
+    "/api/mcp/test",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(server),
+    },
+  );

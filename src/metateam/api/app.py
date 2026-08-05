@@ -4,23 +4,45 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
 import threading
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..core.config import REPO_ROOT, get_settings
 from ..runtime.context import context_budget_tokens, messages_tokens, schemas_tokens
 from ..core.events import Event
 from ..services.memory import read_memory, write_memory
-from ..services.model_config import load_model_config, update_model_config
+from ..services.model_config import load_model_config, select_model_role, update_model_config
+from ..services.local_auth import (
+    TOKEN_HEADER,
+    get_token,
+    is_loopback_bind,
+    load_or_create_token,
+    peer_is_loopback,
+)
+from ..services.user_auth import (
+    auth_status,
+    create_user,
+    list_users,
+    login as user_login,
+    multi_user_enabled,
+    resolve_token,
+    revoke_token,
+    setup_admin,
+)
+from ..services.tenant_context import reset_user, set_user
+from ..services.mcp_config import McpServerConfig, load_mcp_config, update_mcp_config
+from ..services.mcp_runtime import test_server as mcp_test_server
 from ..services.skills import load_skills
 from ..services.store import STORE
 from ..runtime.tools import skill_tool_name
@@ -35,13 +57,78 @@ from ..services.folder_picker import pick_folder
 from ..services import fs_api
 
 app = FastAPI(title="Sidekick", version="0.3.1")
+
+# Local console only — never reflect arbitrary browser Origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", TOKEN_HEADER, "Content-Type", "Accept"],
 )
+
+
+class LocalAuthMiddleware(BaseHTTPMiddleware):
+    """Require X-Sidekick-Token on API routes; reject non-loopback peers."""
+
+    PUBLIC_PREFIXES = (
+        "/api/health",
+        "/api/bootstrap",
+        "/api/auth/status",
+        "/api/auth/setup",
+        "/api/auth/login",
+        "/assets/",
+        "/favicon",
+    )
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path or "/"
+        client_host = request.client.host if request.client else None
+        reset_user()
+
+        # CORS preflight
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        if path.startswith("/api/") and not peer_is_loopback(client_host):
+            return JSONResponse({"detail": "only loopback clients allowed"}, status_code=403)
+
+        public = path == "/" or any(path.startswith(p) for p in self.PUBLIC_PREFIXES)
+        # Static SPA files (js/css) are public; API is not.
+        if path.startswith("/api/") and not public:
+            token = request.headers.get(TOKEN_HEADER) or request.headers.get("X-Sidekick-Token")
+            if not token:
+                token = request.query_params.get("token")
+            resolved = resolve_token(token)
+            if not resolved:
+                return JSONResponse({"detail": "missing or invalid local token"}, status_code=401)
+            uid, uname = resolved
+            set_user(uid, uname)
+            request.state.user_id = uid
+            request.state.username = uname
+        elif path.startswith("/api/") and public:
+            # Optional token on public routes (e.g. status while logged in)
+            token = request.headers.get(TOKEN_HEADER) or request.headers.get("X-Sidekick-Token")
+            resolved = resolve_token(token) if token else None
+            if resolved:
+                uid, uname = resolved
+                set_user(uid, uname)
+                request.state.user_id = uid
+                request.state.username = uname
+
+        try:
+            return await call_next(request)
+        finally:
+            reset_user()
+
+
+app.add_middleware(LocalAuthMiddleware)
+
+
+def _require_loopback(request: Request) -> None:
+    host = request.client.host if request.client else None
+    if not peer_is_loopback(host):
+        raise HTTPException(403, "loopback only")
 
 
 class ChatRequest(BaseModel):
@@ -55,6 +142,13 @@ class MemoryUpdate(BaseModel):
 
 
 class ModelUpdate(BaseModel):
+    # v3 multi-provider payload
+    version: Optional[int] = None
+    providers: Optional[list[dict[str, Any]]] = None
+    main: Optional[dict[str, Any]] = None
+    subagent: Optional[dict[str, Any]] = None
+    compress: Optional[dict[str, Any]] = None
+    # shared / legacy flat fields
     provider: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
@@ -66,6 +160,12 @@ class ModelUpdate(BaseModel):
     thinking_enabled: Optional[bool] = None
     demo_mode: Optional[bool] = None
     temperature: Optional[float] = None
+
+
+class ModelSelect(BaseModel):
+    role: str  # main | subagent | compress
+    provider_id: str
+    model: str  # model id (or name fallback)
 
 
 class WorkspaceSet(BaseModel):
@@ -115,7 +215,174 @@ def health() -> dict[str, Any]:
         "reasoning_effort": getattr(s, "reasoning_effort", ""),
         "context_limit": s.context_limit,
         "compress_trigger_ratio": s.compress_trigger_ratio,
+        "allow_shell": bool(getattr(s, "allow_shell", False)),
+        "shell_sandbox": bool(getattr(s, "shell_sandbox", True)),
+        "mcp_enabled": bool(getattr(s, "mcp_enabled", True)),
     }
+
+
+@app.get("/api/bootstrap")
+def bootstrap(request: Request) -> dict[str, Any]:
+    """Hand the local UI its API token (loopback only).
+
+    After multi-user setup, returns auth_required and no device token —
+    the UI must login via /api/auth/login.
+    """
+    _require_loopback(request)
+    status = auth_status()
+    if status["needs_setup"]:
+        # Legacy single-device token until first admin is created
+        return {
+            **status,
+            "token": get_token(),
+            "token_header": "X-Sidekick-Token",
+            "auth_required": False,
+        }
+    return {
+        **status,
+        "token": None,
+        "token_header": "X-Sidekick-Token",
+        "auth_required": True,
+    }
+
+
+class AuthSetupBody(BaseModel):
+    username: str = Field(..., min_length=2)
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=6)
+
+
+class AuthLoginBody(BaseModel):
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=1)
+    # back-compat: old clients may still send username
+    username: Optional[str] = None
+
+
+class AuthCreateUserBody(BaseModel):
+    username: str = Field(..., min_length=2)
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=6)
+
+
+@app.get("/api/auth/status")
+def api_auth_status(request: Request) -> dict[str, Any]:
+    _require_loopback(request)
+    status = auth_status()
+    user = None
+    uid = getattr(request.state, "user_id", None)
+    uname = getattr(request.state, "username", None)
+    if uid and uname:
+        user = {"id": uid, "username": uname}
+    return {**status, "user": user, "authenticated": bool(user)}
+
+
+@app.post("/api/auth/setup")
+def api_auth_setup(body: AuthSetupBody, request: Request) -> dict[str, Any]:
+    _require_loopback(request)
+    try:
+        user, token = setup_admin(body.username, body.password, email=body.email)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    STORE.refresh_settings()
+    return {
+        "status": "ok",
+        "token": token,
+        "token_header": "X-Sidekick-Token",
+        "user": user.public(),
+    }
+
+
+@app.post("/api/auth/login")
+def api_auth_login(body: AuthLoginBody, request: Request) -> dict[str, Any]:
+    _require_loopback(request)
+    try:
+        email = (body.email or "").strip() or (body.username or "").strip()
+        user, token = user_login(email=email, password=body.password)
+    except ValueError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    return {
+        "status": "ok",
+        "token": token,
+        "token_header": "X-Sidekick-Token",
+        "user": user.public(),
+    }
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout(request: Request) -> dict[str, Any]:
+    token = request.headers.get(TOKEN_HEADER) or request.headers.get("X-Sidekick-Token")
+    revoke_token(token)
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/me")
+def api_auth_me(request: Request) -> dict[str, Any]:
+    uid = getattr(request.state, "user_id", None)
+    uname = getattr(request.state, "username", None)
+    if not uid:
+        raise HTTPException(401, "not authenticated")
+    return {"id": uid, "username": uname or ""}
+
+
+@app.get("/api/auth/users")
+def api_auth_users() -> dict[str, Any]:
+    return {"items": [u.public() for u in list_users()]}
+
+
+@app.post("/api/auth/users")
+def api_auth_create_user(body: AuthCreateUserBody) -> dict[str, Any]:
+    if not multi_user_enabled():
+        raise HTTPException(400, "complete setup first")
+    try:
+        user = create_user(body.username, body.password, email=body.email)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"status": "ok", "user": user.public()}
+
+
+class McpUpdateBody(BaseModel):
+    version: Optional[int] = 1
+    servers: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class McpTestBody(BaseModel):
+    id: str = ""
+    name: str = ""
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+@app.get("/api/mcp")
+def api_mcp_get() -> dict[str, Any]:
+    return load_mcp_config().public_dict()
+
+
+@app.put("/api/mcp")
+def api_mcp_put(body: McpUpdateBody) -> dict[str, Any]:
+    setup = update_mcp_config(body.model_dump())
+    return {"status": "ok", **setup.public_dict()}
+
+
+@app.post("/api/mcp/test")
+def api_mcp_test(body: McpTestBody) -> dict[str, Any]:
+    server = McpServerConfig(
+        id=body.id or "test",
+        name=body.name or body.id or "test",
+        transport=body.transport or "stdio",
+        command=body.command or "",
+        args=list(body.args or []),
+        env=dict(body.env or {}),
+        url=body.url or "",
+        headers=dict(body.headers or {}),
+        enabled=True,
+    )
+    return mcp_test_server(server)
 
 
 @app.get("/api/workspaces")
@@ -166,8 +433,9 @@ def api_workspaces_set(body: WorkspaceSet) -> dict[str, Any]:
 
 
 @app.post("/api/workspaces/browse")
-def api_workspaces_browse() -> dict[str, Any]:
+def api_workspaces_browse(request: Request) -> dict[str, Any]:
     """Open a native folder dialog on this machine and return the selected path."""
+    _require_loopback(request)
     path = pick_folder(title="选择工作区文件夹")
     if not path:
         return {"cancelled": True, "path": None}
@@ -295,8 +563,9 @@ class FileReveal(BaseModel):
 
 
 @app.post("/api/files/reveal")
-def api_files_reveal(body: FileReveal) -> dict[str, Any]:
+def api_files_reveal(request: Request, body: FileReveal) -> dict[str, Any]:
     """Reveal a workspace path in the OS file manager."""
+    _require_loopback(request)
     try:
         return fs_api.reveal_in_os(body.path)
     except FileNotFoundError as exc:
@@ -340,14 +609,32 @@ def put_model(body: ModelUpdate) -> dict[str, Any]:
     cfg = update_model_config(patch)
     STORE.refresh_settings()
     mode = "demo" if cfg.demo_mode else "api"
+    _, model_name, _, _ = cfg.resolve(cfg.main)
     return {
         "status": "ok",
         "config": cfg.masked(),
         "note": (
             "已保存（Demo 模式）。"
             if cfg.demo_mode
-            else f"已保存并生效（{mode} · {cfg.model}）。"
+            else f"已保存并生效（{mode} · {model_name or 'model'}）。"
         ),
+    }
+
+
+@app.patch("/api/model/select")
+def patch_model_select(body: ModelSelect) -> dict[str, Any]:
+    try:
+        cfg = select_model_role(body.role, body.provider_id, body.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    STORE.refresh_settings()
+    _, model_name, _, _ = cfg.resolve(
+        cfg.main if body.role == "main" else cfg.subagent if body.role == "subagent" else cfg.compress
+    )
+    return {
+        "status": "ok",
+        "config": cfg.masked(),
+        "note": f"已切换 {body.role} → {model_name}",
     }
 
 
@@ -541,8 +828,10 @@ async def chat_sse(req: ChatRequest) -> EventSourceResponse:
             sess.updated_at = __import__("time").time()
             try:
                 STORE.persist(sess.id)
-            except Exception:
-                pass
+            except Exception as exc:
+                from ..core.logutil import get_logger, log_exception
+
+                log_exception(get_logger("metateam.api"), f"persist failed for {sess.id}", exc)
             q.put(
                 {
                     "type": "final",
@@ -670,7 +959,22 @@ def main() -> None:
     import uvicorn
 
     s = get_settings()
+    allow_remote = os.getenv("META_ALLOW_REMOTE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if not is_loopback_bind(s.host) and not allow_remote:
+        raise SystemExit(
+            f"Refusing to bind META_HOST={s.host!r} (not loopback). "
+            "Use 127.0.0.1 or set META_ALLOW_REMOTE=1 (unsafe)."
+        )
+    token = load_or_create_token()
     print(f"Sidekick → http://{s.host}:{s.port}  demo={s.demo_mode} model={s.model}")
+    print(f"Local token ready (header X-Sidekick-Token). Preview: {token[:8]}…")
+    if not s.allow_shell:
+        print("Shell tools disabled (META_ALLOW_SHELL=0). Set META_ALLOW_SHELL=1 to enable.")
     uvicorn.run(
         "metateam.api.app:app",
         host=s.host,

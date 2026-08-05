@@ -69,8 +69,8 @@ export const BASE_COMMANDS: SlashCommandDef[] = [
     id: "skill",
     name: "skill",
     aliases: ["run"],
-    description: "调用指定 Skill",
-    argsHint: "<名称>",
+    description: "调用指定 Skill，可在名称后附加指令",
+    argsHint: "<名称> [指令]",
     needsArgs: true,
   },
   {
@@ -164,30 +164,32 @@ export function buildSlashMenuItems(
   const token = (sp < 0 ? queryAfterSlash : queryAfterSlash.slice(0, sp)).toLowerCase();
   const rest = sp < 0 ? "" : queryAfterSlash.slice(sp + 1).trim();
 
-  // `/skill xxx` → filter skills
+  // `/skill xxx …` → filter skills by name token; keep trailing instructions on insert
   const skillCmd = resolveCommand(token);
   if (
     skillCmd &&
     (skillCmd.id === "skill" || skillCmd.name === "skill") &&
     sp >= 0
   ) {
-    const q = rest.toLowerCase();
+    const nameToken = (rest.split(/\s+/)[0] || "").toLowerCase();
+    const taskHint = rest.slice((rest.split(/\s+/)[0] || "").length).trim();
     return skills
       .filter(
         (s) =>
-          !q ||
-          s.name.toLowerCase().includes(q) ||
-          s.tool.toLowerCase().includes(q),
+          !nameToken ||
+          s.name.toLowerCase().includes(nameToken) ||
+          s.tool.toLowerCase().includes(nameToken),
       )
       .slice(0, 12)
       .map((s) => ({
         id: `skill:${s.tool}`,
-        insert: `/skill ${s.name}`,
-        label: `/skill ${s.name}`,
+        insert: taskHint ? `/skill ${s.name} ${taskHint}` : `/skill ${s.name} `,
+        label: taskHint ? `/skill ${s.name} ${taskHint}` : `/skill ${s.name} [指令]`,
         description: s.description || s.tool,
         kind: "skill" as const,
         route: "skill",
-        args: s.name,
+        needsArgs: !taskHint,
+        args: taskHint ? `${s.name} ${taskHint}` : s.name,
       }));
   }
 
@@ -215,11 +217,12 @@ export function buildSlashMenuItems(
       if (!hay.includes(token) && !s.name.toLowerCase().startsWith(token)) continue;
       items.push({
         id: `skill:${s.tool}`,
-        insert: `/skill ${s.name}`,
-        label: `/skill ${s.name}`,
+        insert: `/skill ${s.name} `,
+        label: `/skill ${s.name} [指令]`,
         description: s.description || s.tool,
         kind: "skill",
         route: "skill",
+        needsArgs: true,
         args: s.name,
       });
     }

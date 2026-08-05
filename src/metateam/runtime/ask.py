@@ -19,6 +19,23 @@ _OPTION_LINE_RE = re.compile(
 )
 _TRAILING_PROMPT_RE = re.compile(r"(你是想|请选择|你想|你想要|请选)[：:]\s*$")
 
+# Must look like the model is asking the user to pick, not listing facts/tasks.
+_CHOICE_CUE_RE = re.compile(
+    r"(请选择|请选|选一个|选哪|哪个|哪项|哪一个|还是|或者选|"
+    r"你想要哪|你更倾向|确认一下|要哪一种|"
+    r"which\s+(one|option)|please\s+choose|pick\s+one|"
+    r"do\s+you\s+want|would\s+you\s+rather)",
+    re.IGNORECASE,
+)
+
+# Numbered lists that are answers/summaries, not clarifications.
+_SUMMARY_CUE_RE = re.compile(
+    r"(如下|以下|包括|提出了|提到了|总结|回顾|任务有|任务是|"
+    r"做过|完成了|已经|本轮|本次对话|当前对话|历史|"
+    r"as\s+follows|here\s+are|the\s+tasks|you\s+asked)",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class AskRequest:
@@ -188,7 +205,11 @@ def build_ask_options(labels: list[str]) -> list[dict[str, str]]:
 
 
 def try_parse_inline_ask(text: str) -> Optional[dict[str, Any]]:
-    """If the model wrote numbered/lettered options in plain text, parse for the ask UI."""
+    """If the model wrote a real multiple-choice clarification in plain text, parse it.
+
+    Enumerations of past tasks / facts (e.g. listing what the user already asked)
+    must NOT become an ask_user dialog.
+    """
     raw = (text or "").strip()
     if not raw or len(raw) < 8:
         return None
@@ -217,6 +238,12 @@ def try_parse_inline_ask(text: str) -> Optional[dict[str, Any]]:
     question = re.sub(r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF]+", "", question).strip()
     if not question:
         question = "请选择一个选项"
+
+    probe = f"{question}\n{raw[:400]}"
+    if _SUMMARY_CUE_RE.search(probe) and not _CHOICE_CUE_RE.search(probe):
+        return None
+    if not _CHOICE_CUE_RE.search(probe):
+        return None
 
     labels = [label for _, label in ordered[:MAX_ASK_OPTIONS]]
     allow_custom = any(k.upper() == "D" for k, _ in ordered) or any(

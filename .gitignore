@@ -2,6 +2,11 @@
 .env
 src/data/model.json
 src/data/workspace.json
+src/data/.local_token
+src/data/.secret_key
+src/data/auth_tokens.json
+src/data/users.json
+src/data/tenants/
 
 # Runtime data (do not commit)
 src/sessions/*
@@ -23,7 +28,11 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+tests/.scratch/
 *.log
+
+# Per-workspace codebase index
+**/.sidekick/
 
 # UI
 ui/node_modules/

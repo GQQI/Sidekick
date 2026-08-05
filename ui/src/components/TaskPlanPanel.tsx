@@ -9,6 +9,8 @@ type Props = {
   titleLabel: string;
   collapseLabel?: string;
   expandLabel?: string;
+  /** Default collapsed to keep the chat viewport free. */
+  defaultCollapsed?: boolean;
 };
 
 function checkClass(status: PlanTaskStatus): string {
@@ -25,12 +27,15 @@ export function TaskPlanPanel({
   titleLabel,
   collapseLabel = "收起",
   expandLabel = "展开",
+  defaultCollapsed = true,
 }: Props) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const done = plan.tasks.filter((x) => x.status === "done").length;
+  const running = plan.tasks.find((x) => x.status === "running");
 
   return (
     <div
-      className={`plan-doc task-plan${collapsed ? " collapsed" : ""}`}
+      className={`plan-doc task-plan plan-doc-compact${collapsed ? " collapsed" : ""}`}
       role="region"
       aria-label={titleLabel}
     >
@@ -43,7 +48,10 @@ export function TaskPlanPanel({
         <span className="plan-doc-head-main">
           <span className="plan-doc-badge">{titleLabel}</span>
           <strong className="plan-doc-heading">{plan.summary || titleLabel}</strong>
-          <span className="plan-doc-overview">{subtitle}</span>
+          <span className="plan-doc-overview">
+            {subtitle}
+            {running ? ` · ${running.title}` : ""}
+          </span>
         </span>
         <span className="plan-doc-toggle" aria-hidden>
           {collapsed ? "▸" : "▾"}
@@ -51,7 +59,7 @@ export function TaskPlanPanel({
         <span className="sr-only">{collapsed ? expandLabel : collapseLabel}</span>
       </button>
       {!collapsed && (
-        <ul className="plan-doc-list">
+        <ul className="plan-doc-list plan-doc-list-compact">
           {plan.tasks.map((task, i) => (
             <li
               key={task.id || i}
@@ -61,13 +69,17 @@ export function TaskPlanPanel({
               <span className={`plan-check ${checkClass(task.status)}`} aria-hidden />
               <span className="plan-doc-text">
                 <span className="plan-doc-task-title">{task.title}</span>
-                {task.detail ? (
-                  <span className="plan-doc-task-detail">{task.detail}</span>
-                ) : null}
               </span>
             </li>
           ))}
         </ul>
+      )}
+      {collapsed && (
+        <div className="plan-doc-mini-progress" aria-hidden>
+          <span>
+            {done}/{plan.tasks.length}
+          </span>
+        </div>
       )}
     </div>
   );

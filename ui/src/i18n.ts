@@ -1,8 +1,10 @@
 export type Locale = "zh" | "en";
 export type Theme = "light" | "dark";
+export type Density = "comfort" | "compact";
 
 const LOCALE_KEY = "sidekick.locale";
 const THEME_KEY = "sidekick.theme";
+const DENSITY_KEY = "sidekick.density";
 
 export function loadLocale(): Locale {
   const v = localStorage.getItem(LOCALE_KEY);
@@ -24,6 +26,19 @@ export function saveTheme(theme: Theme) {
 
 export function applyTheme(theme: Theme) {
   document.documentElement.setAttribute("data-theme", theme);
+}
+
+export function loadDensity(): Density {
+  const v = localStorage.getItem(DENSITY_KEY);
+  return v === "compact" ? "compact" : "comfort";
+}
+
+export function saveDensity(density: Density) {
+  localStorage.setItem(DENSITY_KEY, density);
+}
+
+export function applyDensity(density: Density) {
+  document.documentElement.setAttribute("data-density", density);
 }
 
 const zh = {
@@ -97,7 +112,7 @@ const zh = {
   tabModel: "模型",
   tabSkills: "Tools",
   tabMemory: "Memory",
-  tabRuntime: "运行时",
+  tabRuntime: "日志",
   tabAppearance: "外观",
   workspaceTitle: "工作区目录",
   workspaceNone: "尚未选择",
@@ -136,10 +151,25 @@ const zh = {
   modelSwitch: "选择模型",
   modelManage: "管理模型配置…",
   appearanceTitle: "外观与语言",
+  appearanceHint: "调整界面语言、主题与信息密度，仅影响本机显示。",
   language: "语言",
   theme: "主题",
   themeLight: "浅色",
   themeDark: "深色",
+  density: "信息密度",
+  densityComfort: "舒适",
+  densityCompact: "紧凑",
+  aboutTitle: "关于",
+  aboutVersion: "Sidekick Web {0}",
+  aboutBlurb: "本机多智能体工作台 · 数据与对话保存在你的电脑上。",
+  memoryTitle: "长期记忆",
+  memoryHint:
+    "写入 MEMORY.md 的内容会在对话中注入，适合记偏好、约束与项目约定。请勿存放密钥。",
+  memoryChars: "{0} 字符",
+  memoryEmptyHint: "还没有记忆。可记录例如：默认用 pnpm、回复用中文、测试命令是…",
+  logsTitle: "运行日志",
+  logsHint: "查看本会话的事件流与子智能体；任务卡住时可在此对照发生了什么。",
+  logsClearView: "界面日志为会话缓存，刷新页面后清空。",
   context: "上下文",
   pickWorkspaceToast: "请先选择工作区",
   stoppedKeep: "已停止，已保留已生成内容",
@@ -160,9 +190,9 @@ const zh = {
   saveMemory: "保存记忆",
   memorySaved: "Memory 已保存",
   runtimeSubs: "子智能体",
-  runtimeSubsHint: "delegate_task 时在此显示。",
+  runtimeSubsHint: "调用 delegate_task 后，子任务状态会出现在这里。",
   runtimeEvents: "事件流",
-  runtimeEventsHint: "发送消息后显示运行时事件。",
+  runtimeEventsHint: "发送消息后，工具调用与状态事件会按时间列在这里。",
   suggestSkills: "/skills 查看技能",
   suggestMemory: "/memory 查看记忆",
   suggestListDir: "列出当前目录",
@@ -238,6 +268,15 @@ const zh = {
   taskPlanProgress: "执行进度 {0}/{1}",
   planCollapse: "收起任务列表",
   planExpand: "展开任务列表",
+  coherenceTitle: "反堆砌",
+  coherenceKind: "策略",
+  coherenceAlignOn: "需对齐",
+  coherencePileOn: "需检堆砌",
+  coherenceAlignHits: "对齐命中",
+  coherenceContract: "形态合同",
+  coherencePile: "检堆砌",
+  coherenceVerifyOk: "验收通过",
+  coherenceVerifyFail: "验收未通过",
   planConfirmNeeded: "Plan",
   planDialog: "方案确认",
   planApprove: "开始构建",
@@ -345,7 +384,7 @@ const en: { [K in keyof typeof zh]: string } = {
   tabModel: "Model",
   tabSkills: "Tools",
   tabMemory: "Memory",
-  tabRuntime: "Runtime",
+  tabRuntime: "Logs",
   tabAppearance: "Appearance",
   workspaceTitle: "Workspace folder",
   workspaceNone: "Not selected",
@@ -384,10 +423,25 @@ const en: { [K in keyof typeof zh]: string } = {
   modelSwitch: "Select model",
   modelManage: "Manage models…",
   appearanceTitle: "Appearance & language",
+  appearanceHint: "Language, theme, and density — local display only.",
   language: "Language",
   theme: "Theme",
   themeLight: "Light",
   themeDark: "Dark",
+  density: "Density",
+  densityComfort: "Comfortable",
+  densityCompact: "Compact",
+  aboutTitle: "About",
+  aboutVersion: "Sidekick Web {0}",
+  aboutBlurb: "Local multi-agent workbench. Your data stays on this machine.",
+  memoryTitle: "Long-term memory",
+  memoryHint:
+    "MEMORY.md is injected into chats — preferences, constraints, project notes. Do not store secrets.",
+  memoryChars: "{0} chars",
+  memoryEmptyHint: "Empty. Example: prefer pnpm, reply in Chinese, test command is…",
+  logsTitle: "Runtime logs",
+  logsHint: "Session event stream and sub-agents — useful when a task seems stuck.",
+  logsClearView: "UI logs are session-cached and clear on refresh.",
   context: "Context",
   pickWorkspaceToast: "Select a workspace first",
   stoppedKeep: "Stopped — kept generated text",
@@ -408,9 +462,9 @@ const en: { [K in keyof typeof zh]: string } = {
   saveMemory: "Save memory",
   memorySaved: "Memory saved",
   runtimeSubs: "Sub-agents",
-  runtimeSubsHint: "Shown when delegate_task runs.",
+  runtimeSubsHint: "Sub-task status appears here when delegate_task runs.",
   runtimeEvents: "Event stream",
-  runtimeEventsHint: "Events appear after you send a message.",
+  runtimeEventsHint: "Tool calls and status events appear here after you send a message.",
   suggestSkills: "/skills list skills",
   suggestMemory: "/memory show memory",
   suggestListDir: "List current directory",
@@ -486,6 +540,15 @@ const en: { [K in keyof typeof zh]: string } = {
   taskPlanProgress: "Progress {0}/{1}",
   planCollapse: "Collapse tasks",
   planExpand: "Expand tasks",
+  coherenceTitle: "Anti-Piling",
+  coherenceKind: "policy",
+  coherenceAlignOn: "align",
+  coherencePileOn: "pile-check",
+  coherenceAlignHits: "Align hits",
+  coherenceContract: "Shape contract",
+  coherencePile: "Pile check",
+  coherenceVerifyOk: "Verify passed",
+  coherenceVerifyFail: "Verify failed",
   planConfirmNeeded: "Plan",
   planDialog: "Plan confirmation",
   planApprove: "Build",
@@ -542,7 +605,7 @@ export const SLASH_DESC: Record<string, { zh: string; en: string }> = {
   history: { zh: "打开历史会话", en: "Open chat history" },
   save: { zh: "保存当前会话到磁盘", en: "Save current session to disk" },
   skills: { zh: "查看全部 Skills", en: "List all skills" },
-  skill: { zh: "调用指定 Skill", en: "Run a skill by name" },
+  skill: { zh: "调用指定 Skill，可在名称后附加指令", en: "Run a skill; optional instructions after the name" },
   memory: { zh: "查看记忆；可加 edit / refresh", en: "Show memory; optional edit / refresh" },
   model: { zh: "打开模型设置", en: "Open model settings" },
   workspace: { zh: "打开工作区设置", en: "Open workspace settings" },

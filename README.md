@@ -80,6 +80,14 @@ python3 main.py
 
 > 切勿提交真实 Key、`.env` 或对话历史（见 `.gitignore`）。
 
+### 本机安全（默认）
+
+- 仅绑定 `127.0.0.1`；非本机绑定需显式 `META_ALLOW_REMOTE=1`（不安全）。
+- API 需本地令牌（`X-Sidekick-Token`，启动时写入 `src/data/.local_token`）；UI 经 `/api/bootstrap` 自动获取。
+- `model.json` 中的 API Key 使用本机密钥加密存储（`src/data/.secret_key`）。
+- Shell 工具默认关闭（`META_ALLOW_SHELL=0`）；开启后仍走 Agent 审批门。
+- **审批边界**：ApprovalGate 约束 Agent 工具调用；UI 直接写文件走本机令牌 + 前端确认框。
+
 ### UI（可选）
 
 ```powershell

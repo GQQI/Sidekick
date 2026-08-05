@@ -13,16 +13,27 @@ from ..core.config import Settings
 
 
 class LLM:
-    def __init__(self, settings: Settings, model: Optional[str] = None):
+    def __init__(
+        self,
+        settings: Settings,
+        model: Optional[str] = None,
+        *,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
         self.settings = settings
         self.model = model or settings.model
-        self.demo = settings.demo_mode
+        key = (api_key if api_key is not None else settings.api_key) or ""
+        url = (base_url if base_url is not None else settings.base_url) or settings.base_url
+        self.demo = settings.demo_mode and not key.strip()
+        if key.strip():
+            self.demo = False
         self.client: OpenAI | None = None
         self._active_stream: Any = None
         if not self.demo:
-            if not settings.api_key:
+            if not key.strip():
                 raise RuntimeError("API key empty — configure in UI or META_DEMO_MODE=1")
-            self.client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
+            self.client = OpenAI(api_key=key, base_url=url.rstrip("/"))
 
     def close_active_stream(self) -> None:
         """Best-effort close of the in-flight OpenAI stream (interrupts provider read)."""

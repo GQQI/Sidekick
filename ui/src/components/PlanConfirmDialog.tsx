@@ -32,7 +32,7 @@ function newTaskId(): string {
   return `task_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Cursor-style plan document: edit todos, then Build. */
+/** Compact plan confirm: summary + editable task titles, details optional/collapsed. */
 export function PlanConfirmDialog({
   summary,
   tasks,
@@ -47,6 +47,7 @@ export function PlanConfirmDialog({
 }: Props) {
   const [draftSummary, setDraftSummary] = useState(summary);
   const [draftTasks, setDraftTasks] = useState<DraftTask[]>(() => toDraft(tasks));
+  const [showDetails, setShowDetails] = useState(false);
 
   useEffect(() => {
     setDraftSummary(summary);
@@ -87,17 +88,20 @@ export function PlanConfirmDialog({
       .filter((t) => t.title);
     onApprove({
       summary: draftSummary.trim() || summary,
-      tasks: cleaned.length > 0 ? cleaned : toDraft(tasks).map((t) => ({
-        id: t.id,
-        title: t.title || "步骤",
-        detail: t.detail,
-        status: "pending" as const,
-      })),
+      tasks:
+        cleaned.length > 0
+          ? cleaned
+          : toDraft(tasks).map((t) => ({
+              id: t.id,
+              title: t.title || "步骤",
+              detail: t.detail,
+              status: "pending" as const,
+            })),
     });
   }
 
   return (
-    <div className="plan-doc inline-plan plan-doc-edit" role="dialog" aria-label={dialogLabel}>
+    <div className="plan-doc inline-plan plan-doc-edit plan-doc-compact" role="dialog" aria-label={dialogLabel}>
       <div className="plan-doc-top">
         <span className="plan-doc-badge">{titleLabel}</span>
         <input
@@ -109,7 +113,7 @@ export function PlanConfirmDialog({
         />
       </div>
 
-      <ul className="plan-doc-list">
+      <ul className="plan-doc-list plan-doc-list-compact">
         {draftTasks.map((task, i) => (
           <li key={task.id} className="plan-doc-item plan-doc-item-edit">
             <span className="plan-check pending" aria-hidden />
@@ -121,14 +125,16 @@ export function PlanConfirmDialog({
                 placeholder={`任务 ${i + 1}`}
                 onChange={(e) => patchTask(task.id, { title: e.target.value })}
               />
-              <textarea
-                className="plan-doc-detail-input"
-                value={task.detail}
-                disabled={submitting}
-                rows={2}
-                placeholder="可选说明"
-                onChange={(e) => patchTask(task.id, { detail: e.target.value })}
-              />
+              {showDetails ? (
+                <textarea
+                  className="plan-doc-detail-input"
+                  value={task.detail}
+                  disabled={submitting}
+                  rows={2}
+                  placeholder="可选说明"
+                  onChange={(e) => patchTask(task.id, { detail: e.target.value })}
+                />
+              ) : null}
             </div>
             <div className="plan-doc-task-ops">
               <button
@@ -163,30 +169,25 @@ export function PlanConfirmDialog({
         ))}
       </ul>
 
-      <button
-        type="button"
-        className="plan-doc-add-task"
-        disabled={submitting}
-        onClick={addTask}
-      >
-        + {addTaskLabel}
-      </button>
-
-      <div className="plan-doc-actions">
-        <button
-          type="button"
-          className="plan-doc-dismiss"
-          disabled={submitting}
-          onClick={onReject}
-        >
-          {rejectLabel}
+      <div className="plan-doc-toolbar">
+        <button type="button" className="plan-doc-add-task" disabled={submitting} onClick={addTask}>
+          + {addTaskLabel}
         </button>
         <button
           type="button"
-          className="plan-doc-build"
+          className="plan-doc-toggle-details"
           disabled={submitting}
-          onClick={handleBuild}
+          onClick={() => setShowDetails((v) => !v)}
         >
+          {showDetails ? "隐藏说明" : "编辑说明"}
+        </button>
+      </div>
+
+      <div className="plan-doc-actions">
+        <button type="button" className="plan-doc-dismiss" disabled={submitting} onClick={onReject}>
+          {rejectLabel}
+        </button>
+        <button type="button" className="plan-doc-build" disabled={submitting} onClick={handleBuild}>
           {approveLabel}
         </button>
       </div>

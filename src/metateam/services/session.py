@@ -16,6 +16,7 @@ class SessionMeta:
     model: str
     workspace: str
     updated_at: str = ""
+    user_id: str = ""
 
 
 def _now_id() -> str:
@@ -26,7 +27,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def sessions_dir(root: Path) -> Path:
+def sessions_dir(root: Path, user_id: Optional[str] = None) -> Path:
+    """Per-user sessions directory; also accepts legacy flat src/sessions/*.json."""
+    from .tenant_context import get_user_id, tenant_sessions_dir
+
+    uid = user_id if user_id is not None else get_user_id()
+    d = tenant_sessions_dir(uid)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def legacy_sessions_dir(root: Path) -> Path:
     d = root / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -39,9 +50,13 @@ def save_session(
     model: str,
     workspace: Path,
     session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Path:
+    from .tenant_context import get_user_id
+
+    uid = user_id if user_id is not None else get_user_id()
     sid = session_id or _now_id()
-    path = sessions_dir(root) / f"{sid}.json"
+    path = sessions_dir(root, uid) / f"{sid}.json"
     created = _now_iso()
     if path.exists():
         try:
@@ -56,6 +71,7 @@ def save_session(
         updated_at=_now_iso(),
         model=model,
         workspace=str(workspace),
+        user_id=uid,
     )
     path.write_text(
         json.dumps({"meta": asdict(meta), "messages": messages}, ensure_ascii=False, indent=2),
@@ -73,6 +89,7 @@ def load_session(path: Path) -> tuple[SessionMeta, list[dict[str, Any]]]:
         updated_at=str(m.get("updated_at") or ""),
         model=str(m.get("model") or ""),
         workspace=str(m.get("workspace") or ""),
+        user_id=str(m.get("user_id") or ""),
     )
     messages = data.get("messages") or []
     if not isinstance(messages, list):

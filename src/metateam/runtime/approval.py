@@ -114,11 +114,16 @@ APPROVAL_TOOLS = {
     "memory_append",
     "memory_remove",
     "memory_write",
+    "git_commit",
+    "verify_run",
 }
 
 
 def tool_needs_approval(name: str) -> bool:
     if name in APPROVAL_TOOLS:
+        return True
+    # All MCP tools mutate external systems — always gate
+    if (name or "").startswith("mcp_"):
         return True
     return False
 
@@ -151,6 +156,8 @@ def summarize_tool_call(name: str, args: dict[str, Any]) -> str:
         cmd = str(args.get("command") or "")
         bg = " · 后台" if args.get("background") else ""
         return f"shell{bg}: {_short(cmd, 100)}"
+    if (name or "").startswith("mcp_"):
+        return f"MCP {name}: {_short(str(args), 100)}"
     if name == "skill_save":
         return f"保存技能 {args.get('name') or ''}"
     if name == "memory_append":
@@ -170,6 +177,20 @@ def summarize_tool_call(name: str, args: dict[str, Any]) -> str:
     if name == "ask_user":
         q = str(args.get("question") or "")
         return f"询问用户: {_short(q, 80)}"
+    if name == "git_status":
+        return "git status"
+    if name == "git_diff":
+        path = str(args.get("path") or "")
+        staged = "staged " if args.get("staged") else ""
+        return f"git {staged}diff{(' ' + path) if path else ''}"
+    if name == "git_log":
+        return "git log"
+    if name == "git_branch":
+        return "git branch"
+    if name == "git_commit":
+        return f"git commit: {_short(str(args.get('message') or ''), 80)}"
+    if name == "verify_run":
+        return f"验收: {_short(str(args.get('command') or ''), 100)}"
     if name.startswith("skill_"):
         return f"调用技能 {name}"
     for key in ("path", "command", "query", "name", "goal", "note", "question"):

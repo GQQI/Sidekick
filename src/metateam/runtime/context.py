@@ -58,11 +58,13 @@ Output EXACTLY these markdown sections:
 ## Progress
 ## Decisions
 ## Artifacts
+## Workspace
 ## Open Issues
 ## Next
 
 Rules:
 - Prefer paths, commands, error strings, IDs that must survive.
+- ## Workspace MUST list confirmed files/dirs from tools (e.g. only index.html). Never invent src/ if not observed.
 - Drop raw tool dumps and chit-chat.
 - Match the user's language.
 - Keep under 900 tokens."""

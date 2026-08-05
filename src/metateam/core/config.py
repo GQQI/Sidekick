@@ -47,6 +47,12 @@ class Settings:
         or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     )
 
+    # Optional per-role credentials when subagent/compress use another provider
+    subagent_api_key: str = ""
+    subagent_base_url: str = ""
+    compress_api_key: str = ""
+    compress_base_url: str = ""
+
     demo_mode: bool = field(
         default_factory=lambda: _bool("META_DEMO_MODE", False)
         or not os.getenv("OPENAI_API_KEY", "").strip()
@@ -76,8 +82,12 @@ class Settings:
     sessions_dir: Path = field(default_factory=lambda: ROOT / "sessions")
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
 
-    allow_shell: bool = field(default_factory=lambda: _bool("META_ALLOW_SHELL", True))
+    allow_shell: bool = field(default_factory=lambda: _bool("META_ALLOW_SHELL", False))
+    # Path-allowlist sandbox for shell/verify (host cwd=workspace; not a copy FS)
+    shell_sandbox: bool = field(default_factory=lambda: _bool("META_SHELL_SANDBOX", True))
     shell_timeout: int = int(os.getenv("META_SHELL_TIMEOUT", "90"))
+    # Enable MCP tool discovery when mcp package + mcp.json servers are present
+    mcp_enabled: bool = field(default_factory=lambda: _bool("META_MCP_ENABLED", True))
 
     host: str = field(default_factory=lambda: os.getenv("META_HOST", "127.0.0.1"))
     port: int = int(os.getenv("META_PORT", "8787"))
@@ -118,8 +128,10 @@ def get_settings(reload: bool = False) -> Settings:
             from ..services.workspace_store import apply_saved_workspace
 
             apply_saved_workspace()
-        except Exception:
-            pass
+        except Exception as exc:
+            from .logutil import get_logger, log_exception
+
+            log_exception(get_logger("metateam.config"), "apply_saved_workspace failed", exc)
     return _SETTINGS
 
 

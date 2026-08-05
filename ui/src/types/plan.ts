@@ -9,12 +9,22 @@ export type PlanTask = {
   status: PlanTaskStatus;
 };
 
+export type ShapeContract = {
+  reuse?: string;
+  create_only_if?: string;
+  config_placement?: string;
+  control_flow?: string;
+  why_not_smaller?: string;
+  verify_command?: string;
+};
+
 export type ActivePlan = {
   planId: string;
   summary: string;
   mode: "plan" | "agent";
   awaitingConfirm?: boolean;
   tasks: PlanTask[];
+  shapeContract?: ShapeContract | null;
 };
 
 export type PlanConfirmState = {
@@ -22,4 +32,5 @@ export type PlanConfirmState = {
   sessionId: string;
   summary: string;
   tasks: PlanTask[];
+  shapeContract?: ShapeContract | null;
 };

@@ -29,8 +29,21 @@ from .context import (
 from ..core.events import EventBus, emit, new_id
 from ..core.guardrails import Guardrails
 from .llm import LLM, parse_tool_args
-from .plan import PlanGate, format_plan_markdown, generate_plan, needs_plan
+from .plan import (
+    PlanGate,
+    extract_plan_goal,
+    format_plan_markdown,
+    generate_plan,
+    needs_plan,
+)
 from .prompts import build_system_prompt
+from .coherence import (
+    inject_contract_into_goal,
+    format_turn_policy_block,
+    merge_policy_into_system,
+    policy_for_turn,
+    shape_contract_from_plan,
+)
 from .review import run_review
 from ..services.skills import Skill, load_skills
 from .tools import ToolRegistry, build_registry, plan_parallel_batches
@@ -89,9 +102,21 @@ class Agent:
         self._children: list[Agent] = []
 
         self.skills: list[Skill] = load_skills(self.settings.skills_dir)
-        model = self.settings.subagent_model if is_subagent else self.settings.model
-        self.llm = LLM(self.settings, model=model)
-        self.compress_llm = LLM(self.settings, model=self.settings.compress_model)
+        if is_subagent:
+            self.llm = LLM(
+                self.settings,
+                model=self.settings.subagent_model,
+                api_key=getattr(self.settings, "subagent_api_key", None) or self.settings.api_key,
+                base_url=getattr(self.settings, "subagent_base_url", None) or self.settings.base_url,
+            )
+        else:
+            self.llm = LLM(self.settings, model=self.settings.model)
+        self.compress_llm = LLM(
+            self.settings,
+            model=self.settings.compress_model,
+            api_key=getattr(self.settings, "compress_api_key", None) or self.settings.api_key,
+            base_url=getattr(self.settings, "compress_base_url", None) or self.settings.base_url,
+        )
 
         can_delegate = (not is_subagent) or (
             self.role == "orchestrator" and depth < self.settings.max_spawn_depth
@@ -103,6 +128,9 @@ class Agent:
             run_child=self._run_child if can_delegate else None,
             ask_user_fn=self._ask_user,
         )
+        # Sticky facts from tools (list_dir / codebase_*) so later turns don't invent paths.
+        self.workspace_facts: list[str] = []
+        self._turn_policy = None
 
         if messages is not None:
             self.messages = messages
@@ -119,20 +147,26 @@ class Agent:
                 max_depth=self.settings.max_spawn_depth,
             )
             self.messages = [{"role": "system", "content": system}]
+        if not is_subagent:
+            self._refresh_workspace_grounding()
 
     def request_cancel(self) -> None:
         self._cancel.set()
         # Close in-flight provider stream ASAP (do not wait for next chunk)
         try:
             self.llm.close_active_stream()
-        except Exception:
-            pass
+        except Exception as exc:
+            from ..core.logutil import get_logger, log_exception
+
+            log_exception(get_logger("metateam.agent"), "close_active_stream failed", exc)
         # Propagate to nested subagents
         for child in list(self._children):
             try:
                 child.request_cancel()
-            except Exception:
-                pass
+            except Exception as exc:
+                from ..core.logutil import get_logger, log_exception
+
+                log_exception(get_logger("metateam.agent"), "child cancel failed", exc)
         # Unblock any waiting approvals / asks / plan confirms as rejected
         self.approval.cancel_all()
         self.ask.cancel_all()
@@ -562,6 +596,9 @@ class Agent:
         if len(content) > self.settings.tool_result_cap:
             content = content[: self.settings.tool_result_cap] + "\n…[truncated]"
 
+        self._ingest_workspace_fact(name, args, content)
+        self._emit_coherence_tool_events(name, args, content)
+
         self._emit(
             "tool_end",
             {
@@ -580,6 +617,178 @@ class Agent:
             "name": name,
             "content": content,
         }
+
+    def _emit_coherence_tool_events(
+        self, name: str, args: dict[str, Any], content: str
+    ) -> None:
+        """Surface Anti-Piling / verify signals to the UI."""
+        if self.is_subagent:
+            return
+        if name == "codebase_find_similar":
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                data = {}
+            matches = data.get("matches") if isinstance(data, dict) else None
+            top = []
+            if isinstance(matches, list):
+                for m in matches[:5]:
+                    if isinstance(m, dict) and m.get("path"):
+                        top.append(
+                            {
+                                "path": str(m.get("path")),
+                                "score": m.get("score"),
+                                "symbols": m.get("symbols") or [],
+                            }
+                        )
+            self._emit(
+                "coherence_align",
+                {
+                    "query": str(args.get("query") or data.get("query") or ""),
+                    "match_count": int(data.get("match_count") or len(top)),
+                    "matches": top,
+                    "message": f"对齐检索：{data.get('match_count', len(top))} 个候选",
+                },
+            )
+        elif name == "coherence_checklist":
+            self._emit(
+                "coherence_pile",
+                {
+                    "status": "checklist_issued",
+                    "message": "已下发检堆砌清单，请对照证据作答",
+                },
+            )
+        elif name == "verify_run":
+            passed = content.startswith("VERIFY PASS")
+            self._emit(
+                "verify_result",
+                {
+                    "ok": passed,
+                    "command": str(args.get("command") or ""),
+                    "preview": content[:500],
+                    "message": "验收通过" if passed else "验收未通过",
+                },
+            )
+
+    def _ingest_workspace_fact(self, name: str, args: dict[str, Any], content: str) -> None:
+        """Pin layout discoveries so the next user turn still respects them."""
+        if self.is_subagent:
+            return
+        key_tools = {
+            "list_dir",
+            "codebase_overview",
+            "codebase_find_similar",
+            "codebase_impact",
+        }
+        if name not in key_tools:
+            # Also note definitive missing-path reads
+            if name == "read_file" and content.startswith("ERROR: not found"):
+                path = str(args.get("path") or "")
+                note = f"read_file missing: {path}"
+            else:
+                return
+        else:
+            preview = content.strip().replace("\r\n", "\n")
+            if len(preview) > 600:
+                preview = preview[:600] + "…"
+            path_hint = str(args.get("path") or args.get("query") or args.get("symbol_or_path") or ".")
+            note = f"{name}({path_hint}): {preview}"
+
+        self.workspace_facts.append(note)
+        # Keep newest discoveries; drop oldest
+        if len(self.workspace_facts) > 8:
+            self.workspace_facts = self.workspace_facts[-8:]
+
+    def _refresh_workspace_grounding(self) -> None:
+        """Rewrite pinned ground-truth in the system message each user turn."""
+        if self.is_subagent:
+            return
+        if not self.messages or self.messages[0].get("role") != "system":
+            return
+
+        ws = self.settings.workspace.resolve()
+        lines = [
+            "## Workspace ground truth (authoritative)",
+            f"Root: {ws}",
+            "Do NOT invent paths like src/, app/, components/ unless listed below or just confirmed by a tool this turn.",
+            "If a previous tool showed only certain files (e.g. index.html), treat that as current reality until tools say otherwise.",
+        ]
+        try:
+            from ..services import codebase_memory as cbm
+
+            idx = cbm.get_or_build_index(ws)
+            paths = [fe.path for fe in idx.files[:60]]
+            lines.append(f"Indexed files ({len(idx.files)}):")
+            if paths:
+                lines.extend(f"- {p}" for p in paths)
+            else:
+                lines.append("- (none)")
+        except Exception as exc:  # noqa: BLE001
+            from ..core.logutil import get_logger, log_exception
+
+            log_exception(get_logger("metateam.agent"), "grounding index failed", exc)
+
+        # Always include live top-level listing (catches index.html even if index lags)
+        try:
+            entries = sorted(ws.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            shown = []
+            for e in entries[:40]:
+                if e.name.startswith(".") and e.name not in {".sidekick"}:
+                    continue
+                shown.append(f"{'dir' if e.is_dir() else 'file'}:{e.name}")
+            if shown:
+                lines.append("Top-level now: " + ", ".join(shown))
+            else:
+                lines.append("Top-level now: (empty)")
+        except OSError:
+            pass
+
+        if self.workspace_facts:
+            lines.append("Session discoveries (from tools):")
+            lines.extend(f"- {f}" for f in self.workspace_facts[-6:])
+
+        block = "\n".join(lines)
+        marker = "## Workspace ground truth (authoritative)"
+        content = str(self.messages[0].get("content") or "")
+        if marker in content:
+            content = content.split(marker, 1)[0].rstrip()
+        # Also strip older codebase memory overview block to avoid contradicting fresh truth
+        old_cm = "## Codebase memory (structure projection)"
+        if old_cm in content:
+            # keep everything before old_cm; grounding replaces it for live truth
+            head, _, tail = content.partition(old_cm)
+            # drop until next ## or end — crude but ok
+            rest = tail.split("\n## ", 1)
+            if len(rest) == 2:
+                content = (head.rstrip() + "\n\n## " + rest[1]).strip()
+            else:
+                content = head.rstrip()
+
+        self.messages[0]["content"] = (content.rstrip() + "\n\n" + block).strip()
+
+    def _apply_turn_coherence_policy(self, user_text: str) -> None:
+        """Pin per-turn Anti-Piling policy (align/contract/pile) into system message."""
+        if self.is_subagent:
+            return
+        if not self.messages or self.messages[0].get("role") != "system":
+            return
+        policy = policy_for_turn(user_text)
+        self._turn_policy = policy
+        block = format_turn_policy_block(policy)
+        self.messages[0]["content"] = merge_policy_into_system(
+            str(self.messages[0].get("content") or ""),
+            block,
+        )
+        self._emit(
+            "coherence_policy",
+            {
+                "kind": policy.label,
+                "require_align": policy.require_align,
+                "require_shape_contract": policy.require_shape_contract,
+                "require_pile_check": policy.require_pile_check,
+                "message": f"连贯策略：{policy.label}",
+            },
+        )
 
     def _execute_tools(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -605,10 +814,15 @@ class Agent:
 
     def _run_plan_only(self, user_text: str) -> tuple[str, int, bool, bool]:
         """Generate a plan, wait for user confirm, then execute if approved."""
+        self._emit(
+            "assistant_status",
+            {"text": "正在生成方案（反堆砌形态合同）…", "tools": []},
+        )
         plan = generate_plan(self.compress_llm, user_text)
         plan_id = str(plan["plan_id"])
         tasks: list[dict[str, Any]] = list(plan.get("tasks") or [])
         summary = str(plan.get("summary") or "执行计划")
+        shape_contract = shape_contract_from_plan(plan)
         self._emit(
             "plan_created",
             {
@@ -616,6 +830,7 @@ class Agent:
                 "session_id": self.session_id or "",
                 "summary": summary,
                 "tasks": tasks,
+                "shape_contract": shape_contract,
                 "mode": "plan",
                 "awaiting_confirm": True,
             },
@@ -627,6 +842,7 @@ class Agent:
                 "session_id": self.session_id or "",
                 "summary": summary,
                 "tasks": tasks,
+                "shape_contract": shape_contract,
                 "message": f"等待确认方案：{summary[:80]}",
             },
         )
@@ -661,19 +877,26 @@ class Agent:
         return self._execute_plan(plan, user_text)
 
     def _execute_plan(self, plan: dict[str, Any], user_text: str) -> tuple[str, int, bool, bool]:
+        from .coherence import format_shape_contract_markdown
+
         plan_id = str(plan["plan_id"])
         tasks: list[dict[str, Any]] = list(plan.get("tasks") or [])
+        shape_contract = shape_contract_from_plan(plan)
         self._emit(
             "plan_created",
             {
                 "plan_id": plan_id,
                 "summary": plan.get("summary") or "",
                 "tasks": tasks,
+                "shape_contract": shape_contract,
                 "mode": "agent",
                 "awaiting_confirm": False,
             },
         )
-        intro = f"## {plan.get('summary') or '执行计划'}\n\n将按任务列表逐步执行…\n"
+        intro = f"## {plan.get('summary') or '执行计划'}\n\n"
+        if any(shape_contract.values()):
+            intro += format_shape_contract_markdown(shape_contract) + "\n\n"
+        intro += "将按任务列表逐步执行…\n"
         self._emit("assistant_delta", {"chunk": "", "reset": True})
         self._emit("assistant_delta", {"chunk": intro})
 
@@ -700,13 +923,14 @@ class Agent:
                 },
             )
             prior = "\n".join(f"- {s}" for s in step_notes) if step_notes else "(none)"
-            step_msg = (
+            step_body = (
                 f"[Plan step {i + 1}/{len(tasks)}] {title}\n"
                 f"{task.get('detail') or ''}\n\n"
                 f"Original goal: {user_text[:800]}\n"
                 f"Completed prior steps:\n{prior}\n\n"
                 "Complete ONLY this step using tools, then reply with a brief summary."
             )
+            step_msg = inject_contract_into_goal(step_body, shape_contract)
             self.messages.append(
                 {
                     "role": "user",
@@ -766,6 +990,20 @@ class Agent:
                 was_cancelled = True
                 break
             turned = i
+            nudge = self.guard.progress_nudge()
+            if nudge:
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": nudge,
+                        "sidekick_internal": True,
+                        "sidekick": {"internal": True, "kind": "progress_nudge"},
+                    }
+                )
+                self._emit(
+                    "assistant_status",
+                    {"text": "探索过多，已要求停止翻页并开始行动", "tools": []},
+                )
             self._maybe_compress()
             if getattr(self, "_last_compressed", False):
                 compressed = True
@@ -904,8 +1142,12 @@ class Agent:
         if not self.is_subagent:
             self.clear_cancel()
             self.approval.begin_turn()
+            self.guard.begin_turn()
             # Previous stop may have left unfinished tool_calls in history
             self._repair_dangling_tool_calls()
+            # Re-pin live workspace truth so the model does not fall back to src/ priors
+            self._refresh_workspace_grounding()
+            self._apply_turn_coherence_policy(user_text)
         user_turn = sum(1 for m in self.messages if m.get("role") == "user")
         self.messages.append({"role": "user", "content": user_text})
         self.turn_counter += 1
@@ -932,11 +1174,24 @@ class Agent:
         mode_n = (mode or "agent").strip().lower()
 
         try:
+            plan_goal = extract_plan_goal(user_text) or user_text
             if not self.is_subagent and mode_n == "plan":
-                final, turned, was_cancelled, compressed = self._run_plan_only(user_text)
-            elif not self.is_subagent and mode_n == "agent" and needs_plan(user_text):
-                # Complex goals: propose a plan and wait for confirm (same as Plan mode)
-                final, turned, was_cancelled, compressed = self._run_plan_only(user_text)
+                final, turned, was_cancelled, compressed = self._run_plan_only(plan_goal)
+            elif not self.is_subagent and mode_n == "agent":
+                self._emit(
+                    "assistant_status",
+                    {"text": "正在判断是否需要先出方案…", "tools": []},
+                )
+                if needs_plan(self.compress_llm, user_text):
+                    # Model decides Plan-confirm; plan against the user ask,
+                    # not Skill-template scaffolding.
+                    final, turned, was_cancelled, compressed = self._run_plan_only(
+                        plan_goal
+                    )
+                else:
+                    final, turned, was_cancelled, compressed = self._run_agent_loop(
+                        max_iters
+                    )
             else:
                 final, turned, was_cancelled, compressed = self._run_agent_loop(max_iters)
 

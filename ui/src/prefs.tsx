@@ -8,12 +8,16 @@ import {
   type ReactNode,
 } from "react";
 import {
+  applyDensity,
   applyTheme,
+  loadDensity,
   loadLocale,
   loadTheme,
+  saveDensity,
   saveLocale,
   saveTheme,
   translate,
+  type Density,
   type Locale,
   type MsgKey,
   type Theme,
@@ -22,8 +26,10 @@ import {
 type PrefsCtx = {
   locale: Locale;
   theme: Theme;
+  density: Density;
   setLocale: (locale: Locale) => void;
   setTheme: (theme: Theme) => void;
+  setDensity: (density: Density) => void;
   t: (key: MsgKey, ...args: string[]) => string;
 };
 
@@ -35,6 +41,11 @@ export function PrefsProvider({ children }: { children: ReactNode }) {
     const t = loadTheme();
     applyTheme(t);
     return t;
+  });
+  const [density, setDensityState] = useState<Density>(() => {
+    const d = loadDensity();
+    applyDensity(d);
+    return d;
   });
 
   const setLocale = useCallback((next: Locale) => {
@@ -48,14 +59,20 @@ export function PrefsProvider({ children }: { children: ReactNode }) {
     setThemeState(next);
   }, []);
 
+  const setDensity = useCallback((next: Density) => {
+    saveDensity(next);
+    applyDensity(next);
+    setDensityState(next);
+  }, []);
+
   const t = useCallback(
     (key: MsgKey, ...args: string[]) => translate(locale, key, ...args),
     [locale],
   );
 
   const value = useMemo(
-    () => ({ locale, theme, setLocale, setTheme, t }),
-    [locale, theme, setLocale, setTheme, t],
+    () => ({ locale, theme, density, setLocale, setTheme, setDensity, t }),
+    [locale, theme, density, setLocale, setTheme, setDensity, t],
   );
 
   return createElement(Ctx.Provider, { value }, children);

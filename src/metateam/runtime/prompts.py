@@ -30,6 +30,14 @@ renders clickable options from ask_user. Keep assistant content empty or one
 short sentence; put every option label in the options array.
 Do NOT use emoji in clarification questions.
 Do NOT invent a separate "load skill document" step — skills ARE functions.
+Do NOT call ask_user for meta questions that you can answer from this conversation
+(e.g. what the user already asked, summarizing prior tasks) — answer directly in text.
+When listing past tasks or facts, write a normal answer; never frame it as a choice menu.
+
+# Path grounding (CRITICAL)
+Never assume a conventional layout (src/, app/, components/, pages/).
+Only use paths present in Workspace ground truth or confirmed by tools this session.
+If ground truth shows only index.html (or a short file list), edit those — do not open missing folders.
 
 # Parallel tool calls
 Batch independent reads/searches/skill lookups in ONE turn. Serialize only when
@@ -43,10 +51,32 @@ role=orchestrator only for fan-out then synthesize (depth-limited).
 memory_append to save durable facts; memory_remove(match) to forget/delete a fact;
 memory_write to replace the whole MEMORY.md after memory_read + edit.
 MEMORY.md lives outside the workspace — do NOT use write_file/delete_file for it.
+Use MEMORY for preferences/exceptions that code cannot express.
+For engineering reuse and blast radius, use codebase_* tools (code is the primary memory).
 skill_save registers a new skill_* function.
 Mutating tools (write_file, delete_file, run_shell, skill_save, memory_append,
 memory_remove, memory_write) require interactive user approval before they run —
 wait if rejected and continue.
+
+# Codebase-as-Memory (CRITICAL)
+The workspace structure is the source of truth for how this project builds software.
+- codebase_overview: map dirs / suffixes / symbols.
+- codebase_find_similar: REQUIRED before creating a NEW code file; reuse or extend matches.
+- codebase_impact: before editing shared code, inspect who references it.
+- Prefer the smallest change that fits existing assets; do not parallel-reimplement.
+- MEMORY.md does not replace codebase alignment.
+
+# Anti-Piling (CRITICAL)
+Long AI coding fails via piling: overlay (parallel reimplementation), hardcoding,
+and sprawling if/loops. Completion means good shape, not only "it runs".
+- Follow the Turn coherence policy for this turn (align/contract/pile flags).
+- Chat / targeted edits of named files: do not force align.
+- Structural/large work: align first; keep a shape contract; on large work, call
+  coherence_checklist before finishing and fix any evidenced issues.
+- Prefer extending existing abstractions; put variable rules in config/data.
+- git_status / git_diff / git_log / git_branch for repo awareness; git_commit needs approval.
+- If shape_contract.verify_command is set, call verify_run with it before claiming done
+  (requires META_ALLOW_SHELL). Otherwise state how the user should verify.
 """
 
 SUBAGENT_CORE = """You are a focused Sidekick subagent.
@@ -96,6 +126,17 @@ def build_system_prompt(
         )
 
     if not is_subagent:
+        from ..core.logutil import get_logger, log_exception
+
+        try:
+            from ..services import codebase_memory as cbm
+
+            idx = cbm.get_or_build_index(workspace)
+            block = cbm.format_overview_block(idx)
+            if block:
+                parts.append(block)
+        except Exception as exc:
+            log_exception(get_logger("metateam.prompts"), "codebase overview inject failed", exc)
         mem = format_memory_block(memory_file)
         if mem:
             parts.append(mem)
